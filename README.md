@@ -2,6 +2,16 @@
 
 车万女仆（[Touhou Little Maid](https://github.com/TartaricAcid/TouhouLittleMaid)）的 AI 功能增强附属 mod（NeoForge 1.21.1，需 TLM ≥ 1.5.3）。
 
+## 安装要求
+
+| 场景 | 结果 |
+| --- | --- |
+| 服务端装、客户端不装 | ✅ 可正常进服游玩，服务端 token 记账/压缩/统计照常运行；客户端只是看不到本 mod 的任何按钮与界面 |
+| 服务端不装、客户端装 | ❌ 禁止进入：客户端登录后会检测到服务器缺少本 mod 并主动断开（单人游戏不受此限制） |
+| 双端都装 | ✅ 完整功能 |
+
+网络通道以 optional 方式注册，配合客户端登录守卫实现上述非对称语义。
+
 ## 功能
 
 1. **AI 功能增强配置栏**：在 TLM 的 Cloth Config 设置页「AI 功能」大类下追加与 LLM/TTS/STT 并列的「AI 功能增强」子栏目（挂载方式与 Self-Talk 一致）。

@@ -45,6 +45,8 @@
   "gui.tlm_agent_tweaks.price.bad_number": "Prices must be non-negative numbers (blank = 0)",
   "gui.tlm_agent_tweaks.price.sending": "Sent, waiting for server…",
 
+  "disconnect.tlm_agent_tweaks.missing_server": "Cannot join: this server does not have TLM Agent Tweaks installed (server-side support is required)",
+
   "message.tlm_agent_tweaks.compress.success": "Chat history compressed",
   "message.tlm_agent_tweaks.compress.fail.below_threshold": "Compression not allowed yet: last chat token usage %s is below the %sK threshold, keep chatting first",
   "message.tlm_agent_tweaks.compress.fail.busy": "A compression task is already running, try later",

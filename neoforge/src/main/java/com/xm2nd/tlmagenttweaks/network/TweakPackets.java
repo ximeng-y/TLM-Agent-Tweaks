@@ -34,7 +34,11 @@ public final class TweakPackets {
 
     @SubscribeEvent
     public static void register(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar(TlmAgentTweaks.MOD_ID).versioned("1");
+        // optional：未安装本 mod 的客户端可以正常加入装有本 mod 的服务器
+        // （服务端记账/压缩等功能照常运行，仅缺少可视化入口）。
+        // 反方向（客户端装了、服务端没装）由 ServerPresenceGate 在登录后主动断开，
+        // 保证服务端必装的语义。
+        PayloadRegistrar registrar = event.registrar(TlmAgentTweaks.MOD_ID).versioned("1").optional();
         registrar.playToServer(RequestCompressHistoryPayload.TYPE, RequestCompressHistoryPayload.STREAM_CODEC,
                 TweakPackets::handleCompressRequest);
         registrar.playToClient(CompressHistoryResultPayload.TYPE, CompressHistoryResultPayload.STREAM_CODEC,

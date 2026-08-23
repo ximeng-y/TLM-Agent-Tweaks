@@ -45,6 +45,8 @@
   "gui.tlm_agent_tweaks.price.bad_number": "价格须为非负数字（留空视为 0）",
   "gui.tlm_agent_tweaks.price.sending": "已发送，等待服务器确认…",
 
+  "disconnect.tlm_agent_tweaks.missing_server": "无法加入：该服务器未安装 TLM Agent Tweaks（本 mod 需要服务端支持才能工作）",
+
   "message.tlm_agent_tweaks.compress.success": "聊天记录压缩完成",
   "message.tlm_agent_tweaks.compress.fail.below_threshold": "暂不允许压缩：上次对话 token 用量 %s 未达到阈值 %sK，请继续对话后再试",
   "message.tlm_agent_tweaks.compress.fail.busy": "已有压缩任务进行中，请稍候",
