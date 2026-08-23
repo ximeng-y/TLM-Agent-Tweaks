@@ -1,0 +1,34 @@
+# 文档与临时目录
+HANDOFF.md
+.XMTEMP/
+
+# ZCode 会话计划目录（本地维护，不纳入版本管理）
+.zcode/
+
+# Gradle 构建缓存与产物
+.gradle/
+build/
+
+# 编译工具（gradle wrapper 等二进制工具不纳入版本管理）
+gradle/wrapper/
+gradlew
+gradlew.bat
+
+# 游戏运行实例与日志（dev 环境生成的客户端/服务端实例目录）
+run/
+runs/
+logs/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+out/
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# 反编译/字节码研究产物（javap/unzip 提取的 Forge/Mojang class 等，不入库）
+*.class
+/net/
