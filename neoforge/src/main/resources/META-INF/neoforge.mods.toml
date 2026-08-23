@@ -1,0 +1,45 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+
+[[mods]]
+modId = "${mod_id}"
+version = "${mod_version}"
+displayName = "${mod_name}"
+description = '''
+车万女仆（Touhou Little Maid）AI 功能增强：
+手动压缩聊天记录、按输入/输出/缓存命中的 token 明细统计与费用估算。
+与 Maid Self-Talk 可共存（互不为前置）。
+'''
+authors = "${mod_authors}"
+
+[[dependencies.${mod_id}]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.${mod_id}]]
+modId = "minecraft"
+type = "required"
+versionRange = "${minecraft_version_range}"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.${mod_id}]]
+modId = "touhou_little_maid"
+type = "required"
+versionRange = "${tlm_version_range}"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.${mod_id}]]
+modId = "cloth_config"
+type = "optional"
+versionRange = "[15.0,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[mixins]]
+config = "${mod_id}.mixins.json"

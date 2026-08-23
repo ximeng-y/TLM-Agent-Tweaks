@@ -1,0 +1,17 @@
+pluginManagement {
+    repositories {
+        maven { url = 'https://maven.neoforged.net/releases' }
+        maven { url = 'https://repo.spongepowered.org/repository/maven-public/' }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}
+
+rootProject.name = 'TLM-Agent-Tweaks'
+// Chunk-Plan 式单分支混合工程：common（纯 Java 引擎）+ 加载器薄壳
+// 当前仅 neoforge（1.21.1）；后续 Forge 1.20.1 迁移时新增 forge 薄壳子项目
+include 'common', 'neoforge'
