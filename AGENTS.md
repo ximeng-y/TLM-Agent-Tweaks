@@ -6,10 +6,10 @@
 
 ## 兼容性
 
-本项目需兼容以下两个附属 mod（功能互不冲突、可同环境共存）：
+本项目需兼容以下两个附属 mod（功能互不冲突、可同环境共存）。两个项目的源码以 junction 软链接挂在本仓库 `compat/` 下（本地对照开发用，已被 gitignore 忽略），开发时直接读链接目录：
 
-- TouhouLittleMaid-MIMO-TTS：为车万女仆 AI 聊天接入小米 MiMo 语音合成
-- TouhouLittleMaid-Self-Talk：车万女仆 AI 自言自语 + 主人登录欢迎语
+- `compat/TouhouLittleMaid-MIMO-TTS`：为车万女仆 AI 聊天接入小米 MiMo 语音合成
+- `compat/TouhouLittleMaid-Self-Talk`：车万女仆 AI 自言自语 + 主人登录欢迎语
 
 ## 版本控制
 

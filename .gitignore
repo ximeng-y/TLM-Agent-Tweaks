@@ -2,6 +2,9 @@
 HANDOFF.md
 .XMTEMP/
 
+# 兼容项目软链接（junction，本地对照开发用，不纳入版本管理）
+compat/
+
 # ZCode 会话计划目录（本地维护，不纳入版本管理）
 .zcode/
 
