@@ -65,7 +65,8 @@ public final class ManualCompressService {
                     boolean ok = manager.getLastChatTokenUsage() == 0;
                     CompoundTag aiData = ok ? manager.writeToTag(new CompoundTag()) : new CompoundTag();
                     PacketDistributor.sendToPlayer(player,
-                            new CompressHistoryResultPayload(ok, ok ? "" : "compress_failed", 0, 0, entityId, aiData));
+                            new CompressHistoryResultPayload(ok, ok ? "" : "message.tlm_agent_tweaks.compress.fail.compress_failed",
+                                    0, 0, entityId, aiData));
                 });
         if (!scheduled) {
             TlmAgentTweaks.LOGGER.warn("Manual compress scheduling unexpectedly refused, maid {}, player {}",

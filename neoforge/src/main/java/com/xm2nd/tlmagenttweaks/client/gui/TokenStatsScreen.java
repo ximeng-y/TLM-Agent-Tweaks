@@ -58,6 +58,8 @@ public class TokenStatsScreen extends Screen {
     private long consumedVersion = -1;
     private int rankingScroll;
     private int detailIndex;
+    /** 首次 init 时按当前页签发数据请求；rebuildWidgets 重入 init 时不再重复请求 */
+    private boolean initialLoadDone;
 
     public TokenStatsScreen() {
         this(null);
@@ -97,6 +99,12 @@ public class TokenStatsScreen extends Screen {
                                 requestServer();
                             })
                     .bounds(this.width / 2 - 55, 48, 110, 18).build());
+        }
+
+        // 首次进入即按当前页签发数据请求（此后切页签由 switchTab 触发）
+        if (!this.initialLoadDone) {
+            this.initialLoadDone = true;
+            this.refreshRequest();
         }
     }
 
@@ -479,7 +487,8 @@ public class TokenStatsScreen extends Screen {
     }
 
     /** 逐像素画折线段（图表规模小，性能可接受） */
-    private static void drawLine(GuiGraphics graphics, int x1, int y1, int x2, int y2, int color) {        int dx = Math.abs(x2 - x1);
+    private static void drawLine(GuiGraphics graphics, int x1, int y1, int x2, int y2, int color) {
+        int dx = Math.abs(x2 - x1);
         int dy = Math.abs(y2 - y1);
         int steps = Math.max(dx, dy);
         if (steps == 0) {

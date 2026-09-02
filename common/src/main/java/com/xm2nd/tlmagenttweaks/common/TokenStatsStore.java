@@ -2,7 +2,10 @@ package com.xm2nd.tlmagenttweaks.common;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.lang.reflect.Type;
@@ -40,6 +43,7 @@ public class TokenStatsStore {
     private static final Type ROW_LIST_TYPE = new TypeToken<List<TokenUsageRecord>>() {
     }.getType();
     private static final Pattern FILE_PATTERN = Pattern.compile("stats-(\\d{4})-(\\d{2})\\.json");
+    private static final Logger LOGGER = LoggerFactory.getLogger(TokenStatsStore.class);
 
     private record RowKey(int day, String ownerUuid, String siteId, String model) {
     }
@@ -113,6 +117,10 @@ public class TokenStatsStore {
         }
         List<PlayerSummary> list = new ArrayList<>();
         for (Agg agg : byPlayer.values()) {
+            // 显示名缺失（如磁盘数据 ownerName 为 null）时回退为 uuid，避免网络编码 NPE
+            if (agg.name == null) {
+                agg.name = agg.uuid;
+            }
             list.add(agg.toSummary());
         }
         list.sort(Comparator.comparingLong(PlayerSummary::total).reversed());
@@ -208,15 +216,20 @@ public class TokenStatsStore {
                 if (!matcher.matches()) {
                     continue;
                 }
-                List<TokenUsageRecord> loaded = GSON.fromJson(Files.readString(file, StandardCharsets.UTF_8), ROW_LIST_TYPE);
-                if (loaded == null) {
-                    continue;
-                }
-                for (TokenUsageRecord row : loaded) {
-                    if (row.ownerUuid == null || row.siteId == null || row.model == null) {
+                try {
+                    List<TokenUsageRecord> loaded = GSON.fromJson(Files.readString(file, StandardCharsets.UTF_8), ROW_LIST_TYPE);
+                    if (loaded == null) {
                         continue;
                     }
-                    rows.put(new RowKey(row.day, row.ownerUuid, row.siteId, row.model), row);
+                    for (TokenUsageRecord row : loaded) {
+                        if (row.ownerUuid == null || row.siteId == null || row.model == null) {
+                            continue;
+                        }
+                        rows.put(new RowKey(row.day, row.ownerUuid, row.siteId, row.model), row);
+                    }
+                } catch (JsonSyntaxException e) {
+                    // 单个文件损坏只跳过该月，不影响其余数据
+                    LOGGER.warn("统计文件 {} 损坏，已跳过该月数据", file.getFileName(), e);
                 }
             }
         } catch (IOException e) {
@@ -250,6 +263,13 @@ public class TokenStatsStore {
                 Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
             }
             dirtyMonths.remove(monthKey);
+            // 写盘期间回调线程可能新增该月数据（弱一致迭代未覆盖）：有遗漏则保留脏标记，下次落盘补写
+            for (TokenUsageRecord row : rows.values()) {
+                if (row.day >= firstDay && row.day <= lastDay && !monthRows.contains(row)) {
+                    dirtyMonths.add(monthKey);
+                    break;
+                }
+            }
         }
     }
 

@@ -3,6 +3,8 @@ package com.xm2nd.tlmagenttweaks.common;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -141,5 +143,39 @@ class TokenStatsStoreTest {
     void minDayFallsBackToTodayWhenEmpty() {
         TokenStatsStore store = new TokenStatsStore();
         assertEquals(20000, store.minDay(20000));
+    }
+
+    @Test
+    void loadSkipsCorruptedMonthFileAndKeepsOthers() throws Exception {
+        TokenStatsStore store = new TokenStatsStore();
+        LocalDate today = LocalDate.now();
+        store.record("u1", "Alice", "s", "m", 10, 5, 0, 0, msOf(today, 10));
+        store.flush(tempDir);
+        // 混入一个损坏的月度文件
+        Files.writeString(tempDir.resolve("stats-1999-01.json"), "{ not valid json", StandardCharsets.UTF_8);
+        Files.writeString(tempDir.resolve("stats-1999-02.json"), "", StandardCharsets.UTF_8);
+
+        TokenStatsStore reloaded = new TokenStatsStore();
+        reloaded.load(tempDir); // 不应抛异常
+        List<TokenStatsStore.PlayerSummary> ranking = reloaded.playerRanking();
+        assertEquals(1, ranking.size());
+        assertEquals(10, ranking.get(0).input());
+    }
+
+    @Test
+    void rankingFallsBackToUuidWhenNameMissing() throws Exception {
+        LocalDate today = LocalDate.now();
+        String json = ("[{\"day\":%d,\"ownerUuid\":\"u1\",\"ownerName\":null,\"siteId\":\"s\",\"model\":\"m\","
+                + "\"inputTokens\":10,\"outputTokens\":5,\"cacheReadTokens\":0,\"cacheWriteTokens\":0,\"requestCount\":1}]")
+                .formatted((int) today.toEpochDay());
+        Files.createDirectories(tempDir);
+        Files.writeString(tempDir.resolve("stats-%04d-%02d.json".formatted(today.getYear(), today.getMonthValue())),
+                json, StandardCharsets.UTF_8);
+
+        TokenStatsStore store = new TokenStatsStore();
+        store.load(tempDir);
+        List<TokenStatsStore.PlayerSummary> ranking = store.playerRanking();
+        assertEquals(1, ranking.size());
+        assertEquals("u1", ranking.get(0).name());
     }
 }
