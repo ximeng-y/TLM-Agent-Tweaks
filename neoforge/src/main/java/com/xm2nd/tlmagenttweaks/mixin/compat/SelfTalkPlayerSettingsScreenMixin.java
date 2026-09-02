@@ -21,8 +21,8 @@ import java.lang.reflect.Method;
  * <p>
  * 目标类属于 maid_self_talk：字符串目标引用 + {@link Pseudo}（目标类不存在时
  * 自动跳过本 mixin），编译期与运行期均零依赖 Self-Talk。
- * 布局：原 4 个开关按钮占 height/2-20 ~ height/2+70，提示文字在 height/2+80，
- * 本按钮放 height/2+92 避免重叠。
+ * 布局：8 个开关按钮占 colTop ~ colTop+184（colTop = height/2-92，矮屏钳制为 30），
+ * 状态提示文字在 height/2+100 居中，本按钮放 height/2+112 避免盖住提示。
  */
 @Pseudo
 @Mixin(targets = "com.maidmod.selftalk.client.SelfTalkPlayerSettingsScreen", remap = false)
@@ -34,7 +34,7 @@ public abstract class SelfTalkPlayerSettingsScreenMixin {
         Button button = Button.builder(
                         Component.translatable("gui.tlm_agent_tweaks.button.token_stats"),
                         b -> Minecraft.getInstance().setScreen(new TokenStatsScreen()))
-                .bounds(screen.width / 2 - 100, screen.height / 2 + 92, 200, 20)
+                .bounds(screen.width / 2 - 100, screen.height / 2 + 112, 200, 20)
                 .build();
         try {
             Method method = Screen.class.getDeclaredMethod("addRenderableWidget", GuiEventListener.class);
