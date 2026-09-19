@@ -1,0 +1,19 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "com.xm2nd.tlmagenttweaks.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "LLMOpenAIClientMixin",
+    "HistorySummaryManagerInvoker"
+  ],
+  "client": [
+    "HistoryAIChatScreenMixin",
+    "AIChatScreenMixin",
+    "LLMSiteEditorScreenMixin",
+    "compat.SelfTalkPlayerSettingsScreenMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

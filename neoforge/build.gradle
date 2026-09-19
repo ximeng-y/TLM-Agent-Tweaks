@@ -1,0 +1,67 @@
+// neoforge：NeoForge 1.21.1 薄壳（版本组合与 Chunk-Plan 对齐，为将来 forge 薄壳共存铺路）
+
+plugins {
+    id 'java-library'
+    id 'net.neoforged.gradle.userdev' version "${neo_gradle_version}"
+}
+
+base {
+    archivesName = "tlm-agent-tweaks-${mod_version}-neoforge-${minecraft_version}"
+}
+
+// 产物名已含版本号，置空 version 避免追加尾部后缀
+version = ''
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of("${java_version}" as int)
+}
+
+dependencies {
+    implementation "net.neoforged:neoforge:${neoforge_version}"
+
+    // 车万女仆本体（Modrinth maven，Mojang 映射，无需 deobf）
+    implementation "maven.modrinth:touhou-little-maid:${tlm_version}"
+
+    // Cloth Config：编译期引用（运行时由 TLM 的前置保证存在）；dev 运行时也装载以便测试配置页
+    compileOnly "maven.modrinth:cloth-config:${cloth_config_version}"
+    localRuntime "maven.modrinth:cloth-config:${cloth_config_version}"
+
+    // mixin 注解处理器（本项目所有 mixin 均 remap=false，AP 仅做编译期校验）
+    compileOnly "org.spongepowered:mixin:${mixin_version}"
+    annotationProcessor "org.spongepowered:mixin:${mixin_version}:processor"
+}
+
+// common 引擎源码直接并入本模块编译（不用 project 依赖：为将来 Java 17 的 forge 薄壳铺路）
+sourceSets {
+    main {
+        java.srcDir project(':common').sourceSets.main.java.srcDirs
+    }
+}
+
+runs {
+    configureEach {
+        systemProperty 'forge.logging.markers', 'REGISTRIES'
+        systemProperty 'forge.logging.console.level', 'info'
+        modSource project.sourceSets.main
+    }
+    server {
+        programArgument '--nogui'
+    }
+    client {
+    }
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    def replaceProperties = [
+            mod_id          : "${mod_id}",
+            mod_name        : "${mod_name}",
+            mod_version     : "${mod_version}",
+            mod_authors     : "${mod_authors}",
+            minecraft_version_range: "${minecraft_version_range}",
+            tlm_version_range      : "${tlm_version_range}",
+    ]
+    inputs.properties replaceProperties
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand replaceProperties
+    }
+}
