@@ -19,24 +19,46 @@ public final class HttpStringResponse implements HttpResponse<String> {
     private final HttpRequest request;
     private final HttpHeaders headers;
     private final String body;
+    /** 交回上层（日志、错误提示）的正文，可与 {@link #body} 不同（例如截断后的错误正文）。 */
+    private final String reportedBody;
     private final Optional<SSLSession> sslSession;
     private final URI uri;
     private final HttpClient.Version version;
 
     public HttpStringResponse(int statusCode, HttpRequest request, HttpHeaders headers, String body,
                               Optional<SSLSession> sslSession, URI uri, HttpClient.Version version) {
+        this(statusCode, request, headers, body, body, sslSession, uri, version);
+    }
+
+    public HttpStringResponse(int statusCode, HttpRequest request, HttpHeaders headers, String body,
+                              String reportedBody, Optional<SSLSession> sslSession, URI uri,
+                              HttpClient.Version version) {
         this.statusCode = statusCode;
         this.request = request;
         this.headers = headers;
         this.body = body;
+        this.reportedBody = reportedBody;
         this.sslSession = sslSession;
         this.uri = uri;
         this.version = version;
     }
 
     public static HttpStringResponse of(HttpResponse<?> head, String body) {
-        return new HttpStringResponse(head.statusCode(), head.request(), head.headers(), body,
+        return of(head, body, body);
+    }
+
+    /**
+     * @param body         内部使用的完整正文（解析、协议解码必须无损）
+     * @param reportedBody 对外上报的正文，可截断
+     */
+    public static HttpStringResponse of(HttpResponse<?> head, String body, String reportedBody) {
+        return new HttpStringResponse(head.statusCode(), head.request(), head.headers(), body, reportedBody,
                 head.sslSession(), head.uri(), head.version());
+    }
+
+    /** 对外上报的正文（可能被截断）。 */
+    public String reportedBody() {
+        return reportedBody;
     }
 
     @Override
