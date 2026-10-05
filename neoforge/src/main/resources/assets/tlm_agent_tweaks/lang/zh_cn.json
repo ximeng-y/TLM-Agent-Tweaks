@@ -6,8 +6,20 @@
   "gui.tlm_agent_tweaks.navigation.selftalk.tooltip": "Self-Talk 设置",
   "gui.tlm_agent_tweaks.button.compress_history": "压缩聊天记录",
   "gui.tlm_agent_tweaks.button.compress_history.pending": "压缩中…",
-  "gui.tlm_agent_tweaks.button.price": "💰 价格",
+  "gui.tlm_agent_tweaks.button.price": "价格",
+  "gui.tlm_agent_tweaks.button.protocol": "协议",
   "gui.tlm_agent_tweaks.button.token_stats": "Token 统计",
+  "gui.tlm_agent_tweaks.llm.title": "协议设置",
+  "gui.tlm_agent_tweaks.llm.protocol": "协议：%s",
+  "gui.tlm_agent_tweaks.llm.protocol.chat_completions": "Chat Completions",
+  "gui.tlm_agent_tweaks.llm.protocol.responses": "OpenAI Responses",
+  "gui.tlm_agent_tweaks.llm.protocol.anthropic_messages": "Anthropic Messages",
+  "gui.tlm_agent_tweaks.llm.url_mode": "URL 模式：%s",
+  "gui.tlm_agent_tweaks.llm.url_mode.exact": "完整端点",
+  "gui.tlm_agent_tweaks.llm.url_mode.base": "基地址",
+  "gui.tlm_agent_tweaks.llm.final_url": "最终 URL",
+  "gui.tlm_agent_tweaks.llm.final_url_invalid": "URL 解析失败：%s",
+  "gui.tlm_agent_tweaks.llm.back": "返回",
 
   "gui.tlm_agent_tweaks.stats_entry.title": "AI 功能增强",
   "gui.tlm_agent_tweaks.stats.back": "返回",
@@ -63,6 +75,12 @@
   "message.tlm_agent_tweaks.price.cleared": "已清除模型 %s 的价格",
   "message.tlm_agent_tweaks.price.invalid_model": "站点或模型不存在于可用列表，保存被拒绝",
 
+  "chat.tlm_agent_tweaks.retry": "请求失败，%s 秒后重试（第 %s/%s 次）",
+  "chat.tlm_agent_tweaks.retry.rate_limited": "请求过于频繁，%s 秒后重试（第 %s/%s 次）",
+  "chat.tlm_agent_tweaks.retry.fallback": "流式响应中断，正在改用普通模式重试…",
+  "chat.tlm_agent_tweaks.retry.site_queue": "站点繁忙，正在排队等待发送（已重试 %s/%s 次）",
+  "chat.tlm_agent_tweaks.retry.site_queue.first": "站点繁忙，正在排队等待发送…",
+
   "config.tlm_agent_tweaks.title": "AI 功能增强",
   "config.tlm_agent_tweaks.threshold": "手动压缩阈值 (K token)",
   "config.tlm_agent_tweaks.threshold.tooltip": "上次对话 token 用量达到该值时才允许玩家在历史记录界面手动压缩聊天记录，防止反复压缩浪费 token",
@@ -71,5 +89,7 @@
   "config.tlm_agent_tweaks.admin_level": "统计查看权限等级",
   "config.tlm_agent_tweaks.admin_level.tooltip": "查看 Token 统计详情与设置模型价格所需的 OP 权限等级（0-4）",
   "config.tlm_agent_tweaks.record_summary": "压缩摘要请求计入统计",
-  "config.tlm_agent_tweaks.record_summary.tooltip": "历史压缩的摘要请求同样消耗 token，默认计入统计"
+  "config.tlm_agent_tweaks.record_summary.tooltip": "历史压缩的摘要请求同样消耗 token，默认计入统计",
+  "config.tlm_agent_tweaks.retry_enabled": "启用请求失败自动重试",
+  "config.tlm_agent_tweaks.retry_enabled.tooltip": "开启后，429 与 500/502/503/504 最多额外重试 2 次，每次固定等待 5 秒（忽略 Retry-After）；站点冷却期间后到的请求会排队延后发送。关闭后不做重试与站点冷却，但流式断流改用普通模式重发的行为不受影响"
 }

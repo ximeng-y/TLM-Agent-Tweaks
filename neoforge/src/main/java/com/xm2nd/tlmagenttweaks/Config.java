@@ -25,6 +25,12 @@ public final class Config {
             .comment("是否把历史压缩摘要请求也计入 token 统计（这些请求同样消耗 token）")
             .define("stats.recordSummaryCalls", true);
 
+    public static final ModConfigSpec.BooleanValue RETRY_ENABLED = BUILDER
+            .comment("请求失败自动重试总开关（服务端权威）。开启后：429 与 500/502/503/504 最多额外重试 2 次，",
+                    "每次固定等待 5 秒（忽略 Retry-After，不做指数退避）；站点冷却期间后到的请求会排队延后发送。",
+                    "关闭后不做任何重试与站点冷却，但流式断流改用非流式重发的行为不受本开关控制")
+            .define("retry.enabled", true);
+
     public static final ModConfigSpec SPEC = BUILDER.build();
 
     private Config() {

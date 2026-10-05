@@ -27,6 +27,8 @@ public class TlmAgentTweaks {
         modEventBus.addListener(TweakPackets::register);
         // 服务端生命周期（统计引擎加载/落盘）
         NeoForge.EVENT_BUS.register(ServerLifecycleHandler.class);
+        // 流式请求生命周期（实体离开世界/停服时取消在途请求）
+        NeoForge.EVENT_BUS.register(com.xm2nd.tlmagenttweaks.protocol.stream.ProtocolStreamLifecycle.class);
 
         // 客户端：服务端必装守卫（装了本 mod 的客户端连未安装的服务器时主动断开）
         if (FMLEnvironment.dist.isClient()) {

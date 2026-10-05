@@ -38,17 +38,34 @@ public final class TokenUsageParser {
                 return null;
             }
             JsonObject usage = usageElement.getAsJsonObject();
-            long prompt = getAsLong(usage, "prompt_tokens");
+            long prompt;
             long completion = getAsLong(usage, "completion_tokens");
+            long cacheRead;
+            long cacheWrite;
+
+            if (usage.has("prompt_tokens")) {
+                // Chat Completions（含本 mod 归一化后的 Responses/Anthropic 形态）
+                prompt = getAsLong(usage, "prompt_tokens");
+                cacheRead = Math.max(getAsLong(usage, "prompt_cache_hit_tokens"),
+                        getNestedLong(usage, "prompt_tokens_details", "cached_tokens"));
+                cacheWrite = getAsLong(usage, "cache_creation_input_tokens");
+            } else if (usage.has("cache_read_input_tokens") || usage.has("cache_creation_input_tokens")) {
+                // Anthropic 原始 usage：input_tokens 是不含缓存读写的增量输入
+                long freshInput = getAsLong(usage, "input_tokens");
+                cacheRead = getAsLong(usage, "cache_read_input_tokens");
+                cacheWrite = getAsLong(usage, "cache_creation_input_tokens");
+                prompt = freshInput + cacheRead;
+                completion = getAsLong(usage, "output_tokens");
+            } else {
+                // OpenAI Responses 原始 usage：input_tokens 已包含 cached_tokens
+                prompt = getAsLong(usage, "input_tokens");
+                completion = getAsLong(usage, "output_tokens");
+                cacheRead = getNestedLong(usage, "input_tokens_details", "cached_tokens");
+                cacheWrite = 0;
+            }
             if (prompt <= 0 && completion <= 0) {
                 return null;
             }
-            long cacheRead = getAsLong(usage, "prompt_cache_hit_tokens");
-            JsonObject details = usage.getAsJsonObject("prompt_tokens_details");
-            if (details != null) {
-                cacheRead = Math.max(cacheRead, getAsLong(details, "cached_tokens"));
-            }
-            long cacheWrite = getAsLong(usage, "cache_creation_input_tokens");
             return new UsageStats(prompt, completion, cacheRead, cacheWrite);
         } catch (Exception e) {
             return null;
@@ -59,5 +76,13 @@ public final class TokenUsageParser {
         JsonElement element = obj.get(key);
         return element != null && element.isJsonPrimitive() && element.getAsJsonPrimitive().isNumber()
                 ? element.getAsLong() : 0;
+    }
+
+    private static long getNestedLong(JsonObject obj, String objectKey, String valueKey) {
+        JsonElement element = obj.get(objectKey);
+        if (element == null || !element.isJsonObject()) {
+            return 0;
+        }
+        return getAsLong(element.getAsJsonObject(), valueKey);
     }
 }

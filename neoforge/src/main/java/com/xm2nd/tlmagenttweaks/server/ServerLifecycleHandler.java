@@ -1,5 +1,6 @@
 package com.xm2nd.tlmagenttweaks.server;
 
+import com.xm2nd.tlmagenttweaks.protocol.ProtocolMetadataPersistence;
 import com.xm2nd.tlmagenttweaks.stats.TokenStatsService;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
@@ -17,15 +18,18 @@ public final class ServerLifecycleHandler {
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
         TokenStatsService.onServerStarted(event.getServer());
+        ProtocolMetadataPersistence.onServerStarted(event.getServer());
     }
 
     @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
         TokenStatsService.onServerTick();
+        ProtocolMetadataPersistence.onServerTick();
     }
 
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
+        ProtocolMetadataPersistence.onServerStopping();
         TokenStatsService.onServerStopping();
     }
 }

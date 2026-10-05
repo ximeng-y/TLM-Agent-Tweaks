@@ -22,6 +22,8 @@
    - **玩家明细**：四类 token、缓存命中率、CNY/USD 双币种消费金额（均点击排行行进入，‹ › 切换玩家）；
    - **服务器总览**：粒度（时间窗口）可选 1/3/7/14/30/60/90/180/365day/all，窗口内按天出柱（180d/365d 自动按周、all 按月合并），四色竖向堆叠柱 + CNY/USD 双线成本折线图。
 
+5. **请求失败自动重试**：模型站点返回 429 或 500/502/503/504 时，同一轮对话内自动重发，每次请求最多额外重试 **2 次**、每次固定等待 **5 秒**（忽略 `Retry-After`，不做指数退避）。429 一律重试，不区分短期限流与配额耗尽。重试期间只更新等待气泡，不输出聊天栏错误、不提前调用失败回调。站点被限流后进入 5 秒冷却，冷却期间尚未发出的请求排队延后，避免把一个正在限流的站点推向更深的限流。整轮对话（含全部工具续接）共享 240 秒固定预算。规则写死，仅提供 `retry.enabled` 总开关。详见 [docs/llm-request-retry.md](docs/llm-request-retry.md)。
+
 ## 构建
 
 本仓库不携带 gradle wrapper（沿用本地惯例），使用本机缓存的 Gradle 8.14.2（如 Chunk-Plan 的 `.XMTEMP/gradle-8.14.2/bin/gradle`）：
@@ -55,6 +57,7 @@ neoforge/   NeoForge 21.1 薄壳：入口/配置/mixin/网络/GUI/Cloth 集成
 | `stats.enabled` | `true` | token 统计总开关 |
 | `stats.adminPermissionLevel` | `2` | 查看统计/设置价格所需 OP 等级 |
 | `stats.recordSummaryCalls` | `true` | 压缩摘要请求是否计入统计 |
+| `retry.enabled` | `true` | 请求失败自动重试总开关（关闭后无重试与站点冷却；流式断流改用非流式重发不受影响） |
 
 ## 数据文件
 
@@ -78,6 +81,7 @@ neoforge/   NeoForge 21.1 薄壳：入口/配置/mixin/网络/GUI/Cloth 集成
 - ESC 返回原始 AI 聊天屏；Token 统计页的返回目标为 Agent Tweaks 设置页；
 - 与不提供桥的旧版 Self-Talk 合装时，保留其第 4 槽原入口，本 mod 使用第 5 槽 🧩 提供独立设置入口；旧版无统一导航提示由入口 tooltip 与本文档说明，避免静默丢失入口；
 - Self-Talk 自身业务代码不迁移；当前统一导航仅在 NeoForge 1.21.1 侧实现，Forge 1.20.1 迁移尚未覆盖；
+- 本 mod 在 `LLMCallback.onSuccess` / `onFailure` 的 HEAD 清理整轮预算并拦截超时后的迟到结果；状态码重试等待期间不调用 `onFailure`，整轮超时才派发最终失败。与 Self-Talk 的注入方法使用不同名称；
 - 已知微小行为：手动压缩的摘要回调会被 Self-Talk 视作一次「玩家聊天结束」而重置其聊天状态标记，影响可忽略。
 
 ## 统计口径备注
