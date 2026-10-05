@@ -22,6 +22,8 @@
    - **玩家明细**：四类 token、缓存命中率、CNY/USD 双币种消费金额（均点击排行行进入，‹ › 切换玩家）；
    - **服务器总览**：粒度（时间窗口）可选 1/3/7/14/30/60/90/180/365day/all，窗口内按天出柱（180d/365d 自动按周、all 按月合并），四色竖向堆叠柱 + CNY/USD 双线成本折线图。
 
+5. **请求失败自动重试**：模型站点返回 429 或 500/502/503/504 时，同一轮对话内自动重发，每次请求最多额外重试 **2 次**、每次固定等待 **5 秒**（忽略 `Retry-After`，不做指数退避）。429 一律重试，不区分短期限流与配额耗尽。重试期间只更新等待气泡，不输出聊天栏错误、不提前调用失败回调。站点被限流后进入 5 秒冷却，冷却期间尚未发出的请求排队延后，避免把一个正在限流的站点推向更深的限流。整轮对话（含全部工具续接）共享 240 秒固定预算。规则写死，仅提供 `retry.enabled` 总开关。详见 [docs/llm-request-retry.md](docs/llm-request-retry.md)。
+
 ## 构建
 
 本仓库不携带 gradle wrapper（沿用本地惯例），使用本机缓存的 Gradle 8.14.2（如 Chunk-Plan 的 `.XMTEMP/gradle-8.14.2/bin/gradle`）：
@@ -55,6 +57,7 @@ neoforge/   NeoForge 21.1 薄壳：入口/配置/mixin/网络/GUI/Cloth 集成
 | `stats.enabled` | `true` | token 统计总开关 |
 | `stats.adminPermissionLevel` | `2` | 查看统计/设置价格所需 OP 等级 |
 | `stats.recordSummaryCalls` | `true` | 压缩摘要请求是否计入统计 |
+| `retry.enabled` | `true` | 请求失败自动重试总开关（关闭后无重试与站点冷却；流式断流改用非流式重发不受影响） |
 
 ## 数据文件
 
@@ -74,7 +77,7 @@ neoforge/   NeoForge 21.1 薄壳：入口/配置/mixin/网络/GUI/Cloth 集成
 - 互不为前置、可同装也可只装其一；
 - AI 聊天窗口左侧第 4 槽的 💬 按钮：谁装了 Self-Talk 就由谁注册（互斥注册，不重叠）；
 - 装 Self-Talk 时，「Token 统计」按钮经 `@Pseudo` mixin（字符串目标 + 目标类不存在时自动跳过）注入其玩家设置屏底部，不与其原有 4 个开关按钮及提示文字重叠；
-- 双方 mixin 目标类完全不相交（本 mod 只注入 `LLMOpenAIClient.handle`、TLM 的三个界面与压缩管理器；Self-Talk 注入 `MaidAIChatManager.normalChat`、`LLMCallback` 等），无注入冲突；
+- 双方 mixin 目标类完全不相交（本 mod 只注入 `LLMOpenAIClient.handle`、`LLMCallback` 的生命周期方法、TLM 的三个界面与压缩管理器；Self-Talk 注入 `MaidAIChatManager.normalChat`、`LLMCallback` 等），无注入冲突。`LLMCallback` 上双方注入的方法名不同（本 mod 只挂 `onSuccess`/`onFailure` 的 HEAD 做预算清理，且重试期间不调用 `onFailure`），不会互相干扰；
 - 已知微小行为：手动压缩的摘要回调会被 Self-Talk 视作一次「玩家聊天结束」而重置其聊天状态标记，影响可忽略。
 
 ## 统计口径备注
