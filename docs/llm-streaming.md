@@ -1,0 +1,81 @@
+# LLM 流式请求与断流回退
+
+在 [`llm-protocol-adapters.md`](llm-protocol-adapters.md) 的三协议边界之上，本 mod
+把 TLM 原有 LLM 出口换成「优先流式、必要时非流式回退」的传输状态机。调用方仍是
+TLM 原有接口（`LLMOpenAIClient#chat` / `LLMCallback`），消息、工具、历史与失败
+回调语义不变，其他 mod 不需要改动。
+
+## 语义
+
+- 每个逻辑请求最多发出 **两次 HTTP**：先 `stream:true`，失败时用同一份冻结请求体
+  发一次 `stream:false`。
+- 回退不是续传：不重放、不重跑已经执行过的工具轮次，也不改变输入与工具结果快照。
+- 中间失败对外隐藏，调用方只在最终结果上收到一次 `handle`（成功或失败）。
+- `stream_options.include_usage` 只用于 Chat Completions；Responses 与 Anthropic
+  Messages 只发送 `stream:true`。
+
+## 只有两种情况回退
+
+1. 服务端**明确表示不支持** `stream` / `stream_options`：HTTP 400/415/422 且响应体
+   包含 stream 相关的 `not support` / `unsupported` / `unknown` / `invalid` 等字样。
+2. **流式传输中途失败**：连接中断、读 body 超时、缺少协议终止标志
+   （`[DONE]` / `response.completed` / `message_stop`）或分片聚合失败。
+
+以下情况**不回退**，按原样透传给 TLM 的失败处理：
+
+- 401 / 403 / 404 / 429；
+- 普通 400 / 422 / 5xx（没有 stream 不支持提示）；
+- 流式请求返回的是普通 JSON（`application/json`）：直接按协议解码使用，不再请求；
+- 调用方主动取消（实体移除、离开世界、服务器停止），取消不回退、不触发
+  `onFailure`。
+
+## 读取与时限
+
+- 增量读取使用 JDK `HttpClient` + `BodyHandlers.ofInputStream()` 真正按字节流读取，
+  不使用 `ofString` 伪流式。
+- SSE 解帧支持 UTF-8 跨字节块、CRLF/LF/CR、空行分帧、注释、多行 `data`、分片边界；
+  尾部缺少空行的残片不会伪造成事件。
+- 收到协议终止标志后立即收口，不等待 keep-alive 连接的 EOF。
+- 已获得响应头后的 body 读取由独立截止计时器保护：超时会关闭 `InputStream` 并让本次
+  attempt 作废，不依赖 `HttpRequest.timeout` 单独兜底。
+- 每个 attempt 有独立有效性标记，超时/取消/回退后的旧 reader 不会再发增量、
+  发终态事件或提交聚合元数据。
+
+## 只读增量事件
+
+- 增量、回退、完成、失败、取消事件通过服务端只读事件中心
+  （`ProtocolStreamHub`）发布，订阅者只能读，且抛出的异常被隔离，不影响请求。
+- 每个事件都携带按请求捕获的不可变上下文：女仆 UUID、站点 ID、维度、等待气泡 ID。
+- 增量只在服务端发布；**客户端网络与滚动显示属于 issue #2，本 PR 未实现**，
+  也没有向聊天/气泡/TTS 注入任何增量文本。
+- 只有流式成功聚合（或纯 JSON 一次成功）才会提交协议原始历史；断流片段不会污染
+  回退后的历史或 opaque 元数据。
+
+## 生命周期
+
+- 实体移除/离开世界（`EntityLeaveLevelEvent`）按女仆 UUID 取消其在途请求；
+  服务器停止（`ServerStoppingEvent`）取消全部在途请求。
+- 取消会关闭网络连接与截止计时器并清理登记表，异步任务不长期持有世界或女仆对象，
+  避免残留回调污染重进世界后的对话。
+- 取消登记按不可变的 maid UUID 过滤当前在途请求，不维护可并发读写的二级索引。
+
+## 已知限制与风险
+
+- **重复计费风险**：流式请求中断后回退会再发一次非流式请求，服务端可能对两次请求
+  分别计费；中断那次流式尝试的用量对客户端不可见，因此不伪造 0 或精确费用。
+- 用量只使用服务端真实返回的数据，缺失就保持缺失；不回填、不估算。
+- 回退只发生一次；两次都失败时向调用方上报一次最终失败。
+- 未在真实 Minecraft 客户端/服务器实机验证，也未用真实付费端点验证流式行为；
+  自动测试使用 JDK 内置 `HttpServer` 模拟流式与断流。
+
+## 验证
+
+在仓库根目录执行：
+
+```powershell
+& 'E:\others\Projects\Minecraft-Mod\Chunk-Plan\.XMTEMP\gradle-8.14.2\bin\gradle.bat' :common:test :neoforge:build
+```
+
+测试覆盖三协议正常完成、usage 尾块与累计值、交错工具参数、UTF-8 切碎与多行/CR
+分帧、半途 EOF、损坏分片回退、回退再次失败只上报一次、401/429 不回退、
+流式端点返回普通 JSON、监听者异常隔离、取消不回退、截止时间释放阻塞连接。
