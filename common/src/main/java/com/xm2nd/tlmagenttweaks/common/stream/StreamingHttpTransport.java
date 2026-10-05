@@ -602,7 +602,8 @@ public final class StreamingHttpTransport {
             return false;
         }
         String text = body == null ? "" : body.toLowerCase(Locale.ROOT);
-        return text.contains("stream") && (text.contains("not support") || text.contains("unsupported")
+        return text.matches("(?s).*\\bstream(?:ing|_options)?\\b.*")
+                && (text.contains("not support") || text.contains("unsupported")
                 || text.contains("unknown") || text.contains("unrecognized") || text.contains("invalid")
                 || text.contains("cannot") || text.contains("does not support"));
     }
@@ -631,7 +632,7 @@ public final class StreamingHttpTransport {
 
     static byte[] removeStreamFields(SiteProtocol protocol, byte[] body) throws ProtocolException {
         JsonObject json = parseBody(body);
-        json.remove("stream");
+        json.addProperty("stream", false);
         if (protocol == SiteProtocol.CHAT_COMPLETIONS) {
             json.remove("stream_options");
         }

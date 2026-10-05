@@ -324,7 +324,7 @@ class StreamingHttpTransportTest {
                 .getAsJsonObject("message").get("content").getAsString());
         assertEquals(true, parse(streamBodies.get(0)).get("stream").getAsBoolean());
         JsonObject fallback = parse(streamBodies.get(1));
-        assertFalse(fallback.has("stream"));
+        assertFalse(fallback.get("stream").getAsBoolean());
         assertFalse(fallback.has("stream_options"));
     }
 
@@ -363,6 +363,8 @@ class StreamingHttpTransportTest {
 
     @Test
     void rateLimitErrorsAreNotRetried() throws Exception {
+        assertFalse(StreamingHttpTransport.shouldRetryWithoutStream(400, "upstream returned invalid model"));
+        assertTrue(StreamingHttpTransport.shouldRetryWithoutStream(400, "stream_options is unsupported"));
         server.removeContext("/stream");
         server.createContext("/stream", exchange -> {
             streamCalls.incrementAndGet();
