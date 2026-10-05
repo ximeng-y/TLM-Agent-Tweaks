@@ -107,6 +107,133 @@ class StreamingHttpTransportTest {
     }
 
     @Test
+    void headerDisconnectRetriesSamePayloadWithoutStreaming() throws Exception {
+        server.createContext("/header-reset", exchange -> {
+            String body = readBody(exchange);
+            if (isStreamingRequest(body)) {
+                streamCalls.incrementAndGet();
+                exchange.close();
+            } else {
+                nonStreamCalls.incrementAndGet();
+                chatJson(exchange, false);
+            }
+        });
+        HttpResponse<String> response = new StreamingHttpTransport().send(client(),
+                StreamingHttpTransport.freeze(request("/header-reset")), SiteProtocol.CHAT_COMPLETIONS,
+                null).get(5, TimeUnit.SECONDS);
+        assertEquals(200, response.statusCode());
+        assertTrue(streamCalls.get() >= 1);
+        assertEquals(1, nonStreamCalls.get());
+    }
+
+    @Test
+    void completedStreamDoesNotWaitForConnectionCloseOrEmitCancellationLater() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        List<StreamEventType> events = new CopyOnWriteArrayList<>();
+        server.createContext("/keepalive", exchange -> {
+            readBody(exchange);
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(chatSse().getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        try {
+            StreamingHttpTransport.Call call = new StreamingHttpTransport(Duration.ofSeconds(2))
+                    .sendCall(client(), StreamingHttpTransport.freeze(request("/keepalive")),
+                            SiteProtocol.CHAT_COMPLETIONS, new ProtocolStreamRequestListener() {
+                                @Override
+                                public void onEvent(String id, StreamEventType type, String text) {
+                                    events.add(type);
+                                }
+                            });
+            assertEquals(200, call.future().get(1, TimeUnit.SECONDS).statusCode());
+            call.cancel();
+            assertFalse(events.contains(StreamEventType.FALLBACK));
+            assertFalse(events.contains(StreamEventType.CANCELLED));
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void timedOutReaderCannotCloseReplacementRequest() throws Exception {
+        var executor = java.util.concurrent.Executors.newCachedThreadPool();
+        // HttpServer 已启动时不能更换 executor，使用独立服务避免旧阻塞 handler 串行阻挡回退。
+        HttpServer parallel = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        parallel.setExecutor(executor);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger fallbacks = new AtomicInteger();
+        parallel.createContext("/", exchange -> {
+            String body = readBody(exchange);
+            if (!isStreamingRequest(body)) {
+                fallbacks.incrementAndGet();
+                chatJson(exchange, false);
+                return;
+            }
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write("data: {\"choices\":[]}\n\n".getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                release.await(3, TimeUnit.SECONDS);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        parallel.start();
+        try {
+            HttpRequest request = HttpRequest.newBuilder(URI.create(
+                            "http://127.0.0.1:" + parallel.getAddress().getPort() + "/"))
+                    .POST(HttpRequest.BodyPublishers.ofString(chatRequestBody())).build();
+            HttpResponse<String> response = new StreamingHttpTransport(Duration.ofMillis(500))
+                    .send(client(), StreamingHttpTransport.freeze(request), SiteProtocol.CHAT_COMPLETIONS,
+                            null).get(3, TimeUnit.SECONDS);
+            assertEquals(200, response.statusCode());
+            assertEquals(1, fallbacks.get());
+        } finally {
+            release.countDown();
+            parallel.stop(0);
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void repeatedToolNameFragmentsAreNotDeduplicated() throws Exception {
+        ChatCompletionsStreamAggregator aggregator = new ChatCompletionsStreamAggregator(null);
+        aggregator.accept("""
+                {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"x",
+                "function":{"name":"foo","arguments":"{"}}]}}]}
+                """);
+        aggregator.accept("""
+                {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,
+                "function":{"name":"foo","arguments":"}"}}]},"finish_reason":"tool_calls"}]}
+                """);
+        aggregator.accept("[DONE]");
+        assertEquals("foofoo", aggregator.finish().getAsJsonArray("choices").get(0).getAsJsonObject()
+                .getAsJsonObject("message").getAsJsonArray("tool_calls").get(0).getAsJsonObject()
+                .getAsJsonObject("function").get("name").getAsString());
+    }
+
+    @Test
+    void completedButInvalidToolArgumentsTriggerFallback() throws Exception {
+        String scenario = """
+                data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"x","function":{"name":"tool","arguments":"{"}}]},"finish_reason":"tool_calls"}]}
+
+                data: [DONE]
+
+                """;
+        JsonObject response = run(SiteProtocol.CHAT_COMPLETIONS, "/stream", scenario, null);
+        assertEquals("fallback", response.getAsJsonArray("choices").get(0).getAsJsonObject()
+                .getAsJsonObject("message").get("content").getAsString());
+        assertEquals(2, streamCalls.get());
+    }
+
+    @Test
     void streamsAndAggregatesChatCompletionsIncludingUsage() throws Exception {
         List<String> events = new CopyOnWriteArrayList<>();
         JsonObject raw = run(SiteProtocol.CHAT_COMPLETIONS, "/stream", chatSse(),

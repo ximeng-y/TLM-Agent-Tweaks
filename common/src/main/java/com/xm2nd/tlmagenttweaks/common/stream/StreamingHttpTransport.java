@@ -32,7 +32,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -203,10 +202,10 @@ public final class StreamingHttpTransport {
         private final Duration timeout;
         private final String requestId = java.util.UUID.randomUUID().toString();
         private final AtomicBoolean cancelled = new AtomicBoolean();
-        private final AtomicInteger attempt = new AtomicInteger();
-        private final AtomicReference<CompletableFuture<HttpResponse<InputStream>>> activeSend = new AtomicReference<>();
-        private final AtomicReference<InputStream> activeStream = new AtomicReference<>();
-        private final AtomicReference<CompletableFuture<HttpResponse<String>>> activeOuter = new AtomicReference<>();
+        private final AtomicReference<Attempt> activeAttempt = new AtomicReference<>();
+        private final AtomicBoolean terminal = new AtomicBoolean();
+        private final CompletableFuture<HttpResponse<String>> result = new CompletableFuture<>();
+        private boolean usedFallback;
 
         private Session(FrozenRequest frozen, SiteProtocol protocol,
                         ProtocolStreamRequestListener listener, Duration timeout) {
@@ -218,50 +217,47 @@ public final class StreamingHttpTransport {
 
         CompletableFuture<HttpResponse<String>> start(HttpClient client) {
             emit(StreamEventType.STARTED, "");
-            CompletableFuture<HttpResponse<String>> result = new CompletableFuture<>();
+            result.whenComplete((response, failure) -> {
+                if (result.isCancelled()) {
+                    cancel();
+                }
+            });
             attemptStream(client).whenComplete((response, throwable) -> {
                 if (cancelled.get()) {
-                    result.completeExceptionally(new ProtocolException("Streaming request cancelled"));
                     return;
                 }
                 if (throwable == null) {
-                    result.complete(response);
-                    emitTerminal(response);
+                    finish(response, null);
                     return;
                 }
                 Throwable cause = unwrap(throwable);
                 // 只有“明确不支持 stream/stream_options”或“流式读取/聚合中途失败”
                 // 才允许同 payload 的非流式重试；HTTP 错误响应按原样透传。
                 if (!(cause instanceof StreamUnsupportedException) && !(cause instanceof StreamBrokenException)) {
-                    fail(cause);
-                    result.completeExceptionally(cause);
+                    finish(null, cause);
                     return;
                 }
                 if (cancelled.get()) {
-                    result.completeExceptionally(new ProtocolException("Streaming request cancelled"));
                     return;
                 }
                 emit(StreamEventType.FALLBACK, "");
+                usedFallback = true;
                 attemptFallback(client).whenComplete((fallback, fallbackThrowable) -> {
                     if (cancelled.get()) {
-                        result.completeExceptionally(new ProtocolException("Streaming request cancelled"));
                         return;
                     }
                     if (fallbackThrowable != null) {
                         Throwable fallbackCause = unwrap(fallbackThrowable);
-                        fail(fallbackCause);
-                        result.completeExceptionally(fallbackCause);
+                        finish(null, fallbackCause);
                         return;
                     }
-                    result.complete(fallback);
-                    emitTerminal(fallback);
+                    finish(fallback, null);
                 });
             });
             return result;
         }
 
         private CompletableFuture<HttpResponse<String>> attemptStream(HttpClient client) {
-            int token = attempt.incrementAndGet();
             if (cancelled.get()) {
                 return CompletableFuture.failedFuture(new ProtocolException("Streaming request cancelled"));
             }
@@ -271,11 +267,10 @@ public final class StreamingHttpTransport {
             } catch (ProtocolException e) {
                 return CompletableFuture.failedFuture(e);
             }
-            return exchange(client, rebuild(body), token);
+            return exchange(client, rebuild(body), true);
         }
 
         private CompletableFuture<HttpResponse<String>> attemptFallback(HttpClient client) {
-            int token = attempt.incrementAndGet();
             if (cancelled.get()) {
                 return CompletableFuture.failedFuture(new ProtocolException("Streaming request cancelled"));
             }
@@ -285,91 +280,97 @@ public final class StreamingHttpTransport {
             } catch (ProtocolException e) {
                 return CompletableFuture.failedFuture(e);
             }
-            return exchange(client, rebuild(body), token);
+            return exchange(client, rebuild(body), false);
         }
 
         /**
-         * 单次 HTTP attempt。token 标记该 attempt 是否仍为当前有效路径；旧 reader
-         * 即使稍后完成，也会因 token 不符而被拒绝，不会发事件或提交结果。
+         * 每次尝试独占连接、响应流和计时器；旧尝试只能关闭自己的资源，不能关闭回退请求。
          */
         private CompletableFuture<HttpResponse<String>> exchange(HttpClient client, HttpRequest request,
-                                                                 int token) {
-            CompletableFuture<HttpResponse<String>> outer = new CompletableFuture<>();
-            activeOuter.set(outer);
+                                                                 boolean streaming) {
+            Attempt current = new Attempt();
+            current.retryOnTransportFailure = streaming;
+            activeAttempt.set(current);
+            if (cancelled.get()) {
+                current.finish(null, new CancelledException());
+                return current.future;
+            }
             long deadline = System.nanoTime() + timeout.toNanos();
-            CompletableFuture<HttpResponse<InputStream>> send = client.sendAsync(
-                    request, HttpResponse.BodyHandlers.ofInputStream());
-            activeSend.set(send);
-            // 读 body 的硬截止：关闭已到响应头但阻塞的流，并让本次 attempt 以
-            // “流式中断”收口（交由上层做一次非流式回退）。
-            ScheduledFuture<?> guard = DEADLINE.schedule(() -> {
-                // 先作废本次 attempt 并关闭流，再完成 outer：outer 的完成会同步触发
-                // 上层回退，若此时才 cancelActive 会误关掉新回退请求的连接。
-                attempt.incrementAndGet();
-                cancelActive();
-                outer.completeExceptionally(new StreamBrokenException(
-                        new ProtocolException("LLM request phase exceeded deadline " + timeout)));
-            }, Math.max(1L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
-            READER.execute(() -> {
-                boolean streamPhase = false;
-                try {
-                    HttpResponse<InputStream> head = send.join();
-                    // 立刻登记 body 流，保证取消/超时能关闭“已到响应头但尚未进入读取阶段”的流。
-                    activeStream.set(head.body());
-                    if (!isCurrent(token) || cancelled.get()) {
-                        closeQuietly(head.body());
-                        throw new CancelledException();
+            try {
+                synchronized (current) {
+                    if (current.finished) {
+                        return current.future;
                     }
+                    current.send = client.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream());
+                    // 即便取消先于响应头到达，迟到的响应流也必须释放。
+                    current.send.whenComplete((head, error) -> {
+                        if (head != null) {
+                            current.registerStream(head.body());
+                        }
+                    });
+                    current.guard = DEADLINE.schedule(() -> {
+                        ProtocolException failure = new ProtocolException(
+                                "LLM request phase exceeded deadline " + timeout);
+                        current.finish(null, current.retryOnTransportFailure
+                                ? new StreamBrokenException(failure) : failure);
+                    },
+                            Math.max(1L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                }
+            } catch (Throwable error) {
+                current.finish(null, error);
+                return current.future;
+            }
+            READER.execute(() -> {
+                // 在收到响应头前连接被重置，同样属于首次流式请求的传输失败。
+                boolean streamPhase = streaming;
+                try {
+                    HttpResponse<InputStream> head = current.send.join();
+                    current.registerStream(head.body());
+                    current.ensureActive();
                     if (!isSuccessful(head.statusCode())) {
                         // 普通 HTTP 错误（含 401/403/404/429、参数错误、5xx）原样透传，
                         // 只有明确表示 stream 不受支持时才允许回退。
-                        String errorBody = readAll(head.body(), deadline, token);
-                        if (shouldRetryWithoutStream(head.statusCode(), errorBody)) {
+                        streamPhase = false;
+                        current.retryOnTransportFailure = false;
+                        String errorBody = readAll(head.body(), deadline, current);
+                        if (streaming && shouldRetryWithoutStream(head.statusCode(), errorBody)) {
                             throw new StreamUnsupportedException(head.statusCode(), errorBody);
                         }
-                        outer.complete(HttpStringResponse.of(head, errorBody));
+                        current.finish(HttpStringResponse.of(head, errorBody), null);
                         return;
                     }
-                    ContentKind kind = contentKind(head.headers());
-                    streamPhase = kind == ContentKind.SSE;
+                    ContentKind kind = streaming ? contentKind(head.headers()) : ContentKind.JSON;
+                    streamPhase = streaming;
                     String raw = kind == ContentKind.JSON
-                            ? readAll(head.body(), deadline, token)
-                            : readStream(head.body(), deadline, token);
-                    if (!isCurrent(token) || cancelled.get()) {
-                        throw new CancelledException();
-                    }
+                            ? readAll(head.body(), deadline, current)
+                            : readStream(head.body(), deadline, current);
+                    current.ensureActive();
                     JsonObject aggregated = JsonParser.parseString(raw).getAsJsonObject();
-                    // 纯 JSON 响应先按协议校验，确认可解码才算一次成功，避免无谓回退。
-                    if (kind == ContentKind.JSON) {
-                        ProtocolResponseDecoder.decode(protocol, aggregated);
-                    }
-                    // 仅在当前 attempt 仍然有效时才提交聚合结果，旧 reader 不得污染回退后的元数据。
-                    notifyAggregated(aggregated);
-                    outer.complete(HttpStringResponse.of(head, raw));
+                    // 三协议都必须完整解码成功后才交给 TLM；不能把聚合错误留到回退范围之外。
+                    ProtocolResponseDecoder.decode(protocol, aggregated);
+                    current.finish(HttpStringResponse.of(head, raw), null);
                 } catch (Throwable throwable) {
                     Throwable cause = unwrap(throwable);
-                    // attempt 已被超时/取消/回退作废时，终态由作废方负责，旧 reader
-                    // 不得用 CancellationException 覆盖掉可回退的错误分类。
-                    if (!isCurrent(token) || cancelled.get()) {
-                        return;
-                    }
-                    // 流式阶段（成功响应头 + SSE）的中断/聚合失败允许回退一次；
-                    // HTTP 错误响应或纯 JSON 读取失败保持原样。
-                    outer.completeExceptionally(streamPhase ? new StreamBrokenException(cause) : cause);
-                } finally {
-                    guard.cancel(false);
-                    activeSend.compareAndSet(send, null);
-                    activeOuter.compareAndSet(outer, null);
+                    current.finish(null, streamPhase ? new StreamBrokenException(cause) : cause);
                 }
             });
-            return outer;
+            return current.future;
         }
 
         /**
          * 消费 SSE：终止标志到达即停止读取（keep-alive 连接不必等 EOF）。
          */
-        private String readStream(InputStream stream, long deadline, int token) throws Exception {
-            ProtocolStreamAggregator aggregator = newAggregator(protocol, listener, requestId);
+        private String readStream(InputStream stream, long deadline, Attempt current) throws Exception {
+            ProtocolStreamRequestListener guardedListener = new ProtocolStreamRequestListener() {
+                @Override
+                public void onEvent(String id, StreamEventType type, String text) {
+                    synchronized (current) {
+                        current.ensureActive();
+                        emit(type, text);
+                    }
+                }
+            };
+            ProtocolStreamAggregator aggregator = newAggregator(protocol, guardedListener, requestId);
             SseDecoder decoder = new SseDecoder();
             try (stream) {
                 byte[] buffer = new byte[READ_BUFFER_BYTES];
@@ -383,10 +384,11 @@ public final class StreamingHttpTransport {
                         continue;
                     }
                     for (SseEvent event : decoder.feed(buffer, 0, read)) {
-                        if (!isCurrent(token)) {
-                            throw new CancelledException();
-                        }
+                        current.ensureActive();
                         aggregator.accept(event.data());
+                        if (aggregator.complete()) {
+                            break;
+                        }
                     }
                     if (aggregator.complete()) {
                         break;
@@ -394,16 +396,15 @@ public final class StreamingHttpTransport {
                 }
                 if (!aggregator.complete()) {
                     for (SseEvent event : decoder.finish()) {
+                        current.ensureActive();
                         aggregator.accept(event.data());
                     }
                 }
                 return aggregator.finish().toString();
-            } finally {
-                activeStream.compareAndSet(stream, null);
             }
         }
 
-        private String readAll(InputStream stream, long deadline, int token) throws Exception {
+        private String readAll(InputStream stream, long deadline, Attempt current) throws Exception {
             try (stream) {
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
                 byte[] buffer = new byte[READ_BUFFER_BYTES];
@@ -416,14 +417,10 @@ public final class StreamingHttpTransport {
                     if (read == 0) {
                         continue;
                     }
-                    if (!isCurrent(token)) {
-                        throw new CancelledException();
-                    }
+                    current.ensureActive();
                     out.write(buffer, 0, read);
                 }
                 return out.toString(StandardCharsets.UTF_8);
-            } finally {
-                activeStream.compareAndSet(stream, null);
             }
         }
 
@@ -439,35 +436,86 @@ public final class StreamingHttpTransport {
         }
 
         void cancel() {
-            if (!cancelled.compareAndSet(false, true)) {
+            if (!terminal.compareAndSet(false, true)) {
                 return;
             }
-            // 先摘取当前 attempt 的 future，避免 reader 的 finally 抢先把它清空，
-            // 导致取消后调用方 future 永远不完成。
-            CompletableFuture<HttpResponse<String>> outer = activeOuter.getAndSet(null);
-            attempt.incrementAndGet();
-            cancelActive();
-            if (outer != null) {
-                outer.completeExceptionally(new CancelledException());
+            cancelled.set(true);
+            Attempt current = activeAttempt.getAndSet(null);
+            if (current != null) {
+                current.finish(null, new CancelledException());
             }
+            result.completeExceptionally(new CancelledException());
             emit(StreamEventType.CANCELLED, "");
         }
 
-        private void cancelActive() {
-            CompletableFuture<HttpResponse<InputStream>> send = activeSend.getAndSet(null);
-            if (send != null) {
-                send.cancel(true);
+        private void finish(HttpResponse<String> response, Throwable failure) {
+            if (!terminal.compareAndSet(false, true)) {
+                return;
             }
-            closeQuietly(activeStream.getAndSet(null));
+            if (failure != null) {
+                result.completeExceptionally(failure);
+                fail(failure);
+            } else {
+                if (!usedFallback && response != null && isSuccessful(response.statusCode())) {
+                    notifyAggregated(JsonParser.parseString(response.body()).getAsJsonObject());
+                }
+                result.complete(response);
+                emitTerminal(response);
+            }
         }
 
-        private boolean isCurrent(int token) {
-            return attempt.get() == token;
+        /** 尝试级资源所有权；终结必须先关闭本次资源，再完成 future 触发下一次尝试。 */
+        private final class Attempt {
+            private final CompletableFuture<HttpResponse<String>> future = new CompletableFuture<>();
+            private CompletableFuture<HttpResponse<InputStream>> send;
+            private InputStream stream;
+            private ScheduledFuture<?> guard;
+            private boolean finished;
+            private volatile boolean retryOnTransportFailure;
+
+            synchronized void ensureActive() {
+                if (finished || cancelled.get()) {
+                    throw new CancelledException();
+                }
+            }
+
+            synchronized void registerStream(InputStream body) {
+                if (finished || cancelled.get()) {
+                    closeQuietly(body);
+                } else {
+                    stream = body;
+                }
+            }
+
+            void finish(HttpResponse<String> response, Throwable failure) {
+                synchronized (this) {
+                    if (finished) {
+                        return;
+                    }
+                    finished = true;
+                    if (guard != null) {
+                        guard.cancel(false);
+                    }
+                    if (send != null && !send.isDone()) {
+                        send.cancel(true);
+                    }
+                    closeQuietly(stream);
+                    stream = null;
+                }
+                activeAttempt.compareAndSet(this, null);
+                if (failure == null) {
+                    future.complete(response);
+                } else {
+                    future.completeExceptionally(failure);
+                }
+            }
         }
 
         private HttpRequest rebuild(byte[] body) {
             HttpRequest.Builder builder = HttpRequest.newBuilder(frozen.request().uri());
             builder.method(frozen.request().method(), HttpRequest.BodyPublishers.ofByteArray(body));
+            frozen.request().version().ifPresent(builder::version);
+            builder.expectContinue(frozen.request().expectContinue());
             frozen.request().timeout().ifPresent(builder::timeout);
             frozen.request().headers().map().forEach((name, values) -> {
                 for (String value : values) {

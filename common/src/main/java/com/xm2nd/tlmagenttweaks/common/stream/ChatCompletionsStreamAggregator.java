@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Chat Completions 流式聚合器。
@@ -24,7 +25,7 @@ public final class ChatCompletionsStreamAggregator implements ProtocolStreamAggr
     private long created;
     private JsonObject usage;
     private boolean done;
-    private final Map<Integer, ChoiceState> choices = new LinkedHashMap<>();
+    private final Map<Integer, ChoiceState> choices = new TreeMap<>();
 
     public ChatCompletionsStreamAggregator(StreamEventListener listener) {
         this.listener = listener;
@@ -88,12 +89,14 @@ public final class ChatCompletionsStreamAggregator implements ProtocolStreamAggr
         String content = StreamJson.optionalString(delta, "content");
         if (content != null && !content.isEmpty()) {
             state.content.append(content);
-            emit(StreamEventType.TEXT_DELTA, content);
+            if (index == 0) {
+                emit(StreamEventType.TEXT_DELTA, content);
+            }
         }
         String reasoning = firstNonEmpty(
                 StreamJson.optionalString(delta, "reasoning_content"),
                 StreamJson.optionalString(delta, "reasoning"));
-        if (reasoning != null && !reasoning.isEmpty()) {
+        if (index == 0 && reasoning != null && !reasoning.isEmpty()) {
             emit(StreamEventType.REASONING_DELTA, reasoning);
         }
         JsonArray toolCalls = StreamJson.optionalArray(delta, "tool_calls");
@@ -133,7 +136,7 @@ public final class ChatCompletionsStreamAggregator implements ProtocolStreamAggr
         if (name != null && !name.isEmpty()) {
             if (call.name == null) {
                 call.name = name;
-            } else if (!call.name.endsWith(name)) {
+            } else {
                 call.name += name;
             }
         }
@@ -162,6 +165,9 @@ public final class ChatCompletionsStreamAggregator implements ProtocolStreamAggr
             if (state.finishReason == null) {
                 throw new ProtocolException("Chat Completions stream ended without finish_reason");
             }
+            if ("length".equals(state.finishReason)) {
+                throw new ProtocolException("Chat Completions stream reached its output limit");
+            }
             JsonObject choice = new JsonObject();
             choice.addProperty("index", entry.getKey());
             JsonObject message = new JsonObject();
@@ -169,11 +175,12 @@ public final class ChatCompletionsStreamAggregator implements ProtocolStreamAggr
             message.addProperty("content", state.content.toString());
             if (!state.toolCalls.isEmpty()) {
                 JsonArray toolCalls = new JsonArray();
-                for (ToolCallState call : state.toolCalls) {
+                for (ToolCallState call : state.byIndex.values()) {
                     if (call.id == null || call.id.isEmpty() || call.name == null || call.name.isEmpty()) {
                         throw new ProtocolException("Chat Completions tool call is incomplete");
                     }
                     JsonObject function = new JsonObject();
+                    StreamJson.parseObject(call.arguments.toString(), "tool arguments");
                     function.addProperty("name", call.name);
                     function.addProperty("arguments", call.arguments.toString());
                     JsonObject toolCall = new JsonObject();
@@ -232,7 +239,7 @@ public final class ChatCompletionsStreamAggregator implements ProtocolStreamAggr
     private static final class ChoiceState {
         private final StringBuilder content = new StringBuilder();
         private final List<ToolCallState> toolCalls = new ArrayList<>();
-        private final Map<Integer, ToolCallState> byIndex = new LinkedHashMap<>();
+        private final Map<Integer, ToolCallState> byIndex = new TreeMap<>();
         private final Map<String, ToolCallState> byId = new LinkedHashMap<>();
         private String role;
         private String finishReason;
