@@ -357,6 +357,11 @@ public final class ProtocolRequestEncoder {
     private static void rejectUnsupportedCanonicalFields(JsonObject canonical, String protocolName)
             throws ProtocolException {
         for (String field : canonical.keySet()) {
+            // TLM 的 hasThinkingField 会生成 Chat 专用 thinking 扩展。
+            // 目标协议重新构造请求，不透传该站点遗留参数，也不猜测模型支持的推理设置。
+            if (field.equals("thinking")) {
+                continue;
+            }
             if (!field.equals("model") && !field.equals("messages")
                     && !field.equals("tools") && !field.equals("response_format")) {
                 throw new ProtocolException("Unsupported Chat Completion field for " + protocolName + ": " + field);
