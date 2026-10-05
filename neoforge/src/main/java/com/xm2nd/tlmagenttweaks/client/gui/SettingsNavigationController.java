@@ -10,6 +10,7 @@ import net.minecraft.network.chat.Component;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.api.distmarker.OnlyIn;
 import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ScreenEvent;
 
 import java.util.function.Consumer;
@@ -24,7 +25,7 @@ import java.util.function.Consumer;
 public final class SettingsNavigationController {
 
     private static final int TAB_X = 6;
-    private static final int TAB_Y = 30;
+    private static final int TAB_Y = 4;
     private static final int TAB_SIZE = 20;
     private static final int TAB_GAP = 2;
 
@@ -77,6 +78,12 @@ public final class SettingsNavigationController {
         }
     }
 
+    /** 退出世界时清理对实体、父界面和当前 Self-Talk 页面的静态引用。 */
+    @SubscribeEvent
+    public static void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
+        clearNavigationState();
+    }
+
     /** Tweaks 页在自身 init 中调用，使用页面自有的 addRenderableWidget 注册页签。 */
     public static void addTweaksPageTabs(Consumer<Button> addWidget) {
         if (!SelfTalkNavigationBridge.isAvailable()) {
@@ -86,22 +93,37 @@ public final class SettingsNavigationController {
     }
 
     private static void addNavigationTabs(boolean selfTalkActive, Consumer<Button> add) {
+        TabState state = tabState(selfTalkActive);
         Button tweaksTab = Button.builder(Component.literal("🧩"), button -> openTweaksFromSelfTalk())
                 .bounds(TAB_X, TAB_Y, TAB_SIZE, TAB_SIZE)
                 .tooltip(Tooltip.create(Component.translatable(
                         "gui.tlm_agent_tweaks.navigation.tweaks.tooltip")))
                 .build();
-        tweaksTab.active = !selfTalkActive;
+        tweaksTab.active = state.tweaksActive();
 
         Button selfTalkTab = Button.builder(Component.literal("💬"), button -> openSelfTalkScreen())
                 .bounds(TAB_X + TAB_SIZE + TAB_GAP, TAB_Y, TAB_SIZE, TAB_SIZE)
                 .tooltip(Tooltip.create(Component.translatable(
                         "gui.tlm_agent_tweaks.navigation.selftalk.tooltip")))
                 .build();
-        selfTalkTab.active = !selfTalkActive;
+        selfTalkTab.active = state.selfTalkActive();
 
         add.accept(tweaksTab);
         add.accept(selfTalkTab);
+    }
+
+    /** 纯状态映射，供页签按钮设置和单元测试共用。 */
+    static TabState tabState(boolean selfTalkPageActive) {
+        return new TabState(selfTalkPageActive, !selfTalkPageActive);
+    }
+
+    static void clearNavigationState() {
+        navigationMaid = null;
+        chatParent = null;
+        selfTalkScreen = null;
+    }
+
+    record TabState(boolean tweaksActive, boolean selfTalkActive) {
     }
 
     /** 从 Self-Talk 切到 Tweaks：保存 Prompt 并确认没有浮层后，才真正切屏。 */

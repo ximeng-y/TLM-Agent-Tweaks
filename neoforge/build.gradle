@@ -29,6 +29,9 @@ dependencies {
     // mixin 注解处理器（本项目所有 mixin 均 remap=false，AP 仅做编译期校验）
     compileOnly "org.spongepowered:mixin:${mixin_version}"
     annotationProcessor "org.spongepowered:mixin:${mixin_version}:processor"
+
+    testImplementation platform("org.junit:junit-bom:${junit_version}")
+    testImplementation 'org.junit.jupiter:junit-jupiter'
 }
 
 // common 引擎源码直接并入本模块编译（不用 project 依赖：为将来 Java 17 的 forge 薄壳铺路）
@@ -48,6 +51,14 @@ runs {
         programArgument '--nogui'
     }
     client {
+    }
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'failed', 'skipped'
+        exceptionFormat 'full'
     }
 }
 

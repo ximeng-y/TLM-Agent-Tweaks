@@ -73,7 +73,7 @@ neoforge/   NeoForge 21.1 薄壳：入口/配置/mixin/网络/GUI/Cloth 集成
 
 - 互不为前置、可同装也可只装其一；
 - 未装 Self-Talk 时，本 mod 在 AI 聊天窗口注册第 4 槽的 🧩 独立设置入口；
-- 与提供 `SelfTalkSettingsBridge` 的新版 Self-Talk 合装时，Self-Talk 保留并注册第 4 槽 💬 物理入口，点击后委托本 mod 打开统一导航；Agent Tweaks 与 Self-Talk 页面保持为两个真实独立 Screen，通过左上角 `20x20` 图标页签切换，页签位于 `(6, 30)` 并提供完整 tooltip；
+- 与提供 `SelfTalkSettingsBridge` 的新版 Self-Talk 合装时，Self-Talk 保留并注册第 4 槽 💬 物理入口，点击后委托本 mod 打开统一导航；Agent Tweaks 与 Self-Talk 页面保持为两个真实独立 Screen，通过左上角 `20x20` 图标页签切换，页签位于 `(6, 4)` 并提供完整 tooltip；
 - 切出 Self-Talk 前由导航调用桥的 `prepareForNavigation`：有浮层时禁止切换，其余情况先保存 Prompt 再切换；每次重新进入 Self-Talk 都新建页面以重新请求配置，不缓存旧 dirty 回包守卫；
 - ESC 返回原始 AI 聊天屏；Token 统计页的返回目标为 Agent Tweaks 设置页；
 - 与不提供桥的旧版 Self-Talk 合装时，保留其第 4 槽原入口，本 mod 使用第 5 槽 🧩 提供独立设置入口；旧版无统一导航提示由入口 tooltip 与本文档说明，避免静默丢失入口；
