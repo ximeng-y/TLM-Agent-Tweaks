@@ -351,7 +351,8 @@ public final class StreamingHttpTransport {
                     current.finish(HttpStringResponse.of(head, raw), null);
                 } catch (Throwable throwable) {
                     Throwable cause = unwrap(throwable);
-                    current.finish(null, streamPhase ? new StreamBrokenException(cause) : cause);
+                    current.finish(null, streamPhase && !(cause instanceof StreamServiceException)
+                            ? new StreamBrokenException(cause) : cause);
                 }
             });
             return current.future;

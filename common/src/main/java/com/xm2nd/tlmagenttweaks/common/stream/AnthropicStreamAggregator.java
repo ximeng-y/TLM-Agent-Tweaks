@@ -45,7 +45,7 @@ public final class AnthropicStreamAggregator implements ProtocolStreamAggregator
             case "ping" -> {
                 // 心跳忽略
             }
-            case "error" -> throw new ProtocolException("Anthropic stream error: "
+            case "error" -> throw new StreamServiceException("Anthropic stream error: "
                     + errorMessage(event.get("error")));
             default -> {
                 // 未知事件对核心内容无影响；未知内容块在 start 阶段会显式失败。
