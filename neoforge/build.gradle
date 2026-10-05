@@ -55,6 +55,14 @@ runs {
     }
 }
 
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
+}
+
 tasks.named('processResources', ProcessResources).configure {
     def replaceProperties = [
             mod_id          : "${mod_id}",

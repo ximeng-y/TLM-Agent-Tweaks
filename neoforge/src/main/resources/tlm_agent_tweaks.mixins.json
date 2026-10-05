@@ -11,8 +11,7 @@
   "client": [
     "HistoryAIChatScreenMixin",
     "AIChatScreenMixin",
-    "LLMSiteEditorScreenMixin",
-    "compat.SelfTalkPlayerSettingsScreenMixin"
+    "LLMSiteEditorScreenMixin"
   ],
   "injectors": {
     "defaultRequire": 1
