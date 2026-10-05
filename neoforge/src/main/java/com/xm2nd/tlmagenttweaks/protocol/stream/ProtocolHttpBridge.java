@@ -1,6 +1,7 @@
 package com.xm2nd.tlmagenttweaks.protocol.stream;
 
 import com.github.tartaricacid.touhoulittlemaid.ai.manager.entity.LLMCallback;
+import com.github.tartaricacid.touhoulittlemaid.ai.service.ErrorCode;
 import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
 import com.xm2nd.tlmagenttweaks.common.stream.RequestRetryPolicy;
 import com.xm2nd.tlmagenttweaks.common.stream.SiteThrottleScheduler;
@@ -44,8 +45,8 @@ public final class ProtocolHttpBridge {
     private static final Set<LLMCallback> CANCELLED =
             Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
     /** 已被整轮超时终结的回调：只上报一次最终失败，之后的迟到结果一律丢弃。 */
-    private static final Set<LLMCallback> TIMED_OUT =
-            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+    private static final Map<LLMCallback, Throwable> TIMED_OUT =
+            Collections.synchronizedMap(new WeakHashMap<>());
     private static volatile boolean stopping;
 
     private ProtocolHttpBridge() {
@@ -54,12 +55,12 @@ public final class ProtocolHttpBridge {
     public static CompletableFuture<HttpResponse<String>> send(HttpClient client, HttpRequest request,
                                                                com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.LLMOpenAISite site,
                                                                LLMCallback callback) {
-        if (isInactive(callback)) {
+        if (isInactive(callback) || wasTimedOut(callback)) {
             return CompletableFuture.failedFuture(new StreamingHttpTransport.CancelledException());
         }
         if (ProtocolRetryBudget.isExpired(callback)) {
             // 整轮预算已耗尽：拒绝后续（含工具续接产生的）请求，且不再产生第二次失败。
-            markTimedOut(callback);
+            expire(callback, request);
             return CompletableFuture.failedFuture(timeoutFailure());
         }
         SiteProtocol protocol = ProtocolBridge.protocolOf(site);
@@ -70,14 +71,14 @@ public final class ProtocolHttpBridge {
         // 提示器随本次请求的配置快照构造，配置在请求进行中被改动不影响本轮。
         RetryNotifier notifier = new RetryNotifier(callback, policy);        StreamingHttpTransport.Call call = TRANSPORT.prepare(client, frozen, protocol, listener,
                 siteId, ProtocolRetryBudget.budgetFor(callback), policy, notifier);
-        register(callback, call::cancel, notifier);
+        register(callback, call::cancel, notifier, request);
         // 发送与登记之间可能恰好发生实体离场，不能依赖只触发一次的离场事件兜底。
-        if (isInactive(callback)) {
+        if (isInactive(callback) || wasTimedOut(callback)) {
             cancel(callback);
             return call.future();
         }
         call.start();
-        return call.future().whenComplete((response, throwable) -> unregister(callback));
+        return call.future().whenComplete((response, throwable) -> notifier.stopNotifications());
     }
 
     public static boolean isInactive(LLMCallback callback) {
@@ -91,25 +92,32 @@ public final class ProtocolHttpBridge {
                 || level.getServer().isStopped();
     }
 
-    private static void register(LLMCallback callback, CancelHandle handle, RetryNotifier notifier) {
+    private static void register(LLMCallback callback, CancelHandle handle, RetryNotifier notifier,
+                                 HttpRequest request) {
         if (callback == null) {
             return;
         }
-        PENDING.put(callback, new Entry(maidId(callback), handle, notifier));
-        // 工具续接沿用同一个回调对象，因此剩余时间必须重新计算：
-        // 每轮请求都按完整预算重排一次，整轮上限会随着请求次数无限延长。
-        notifier.scheduleDeadline(ProtocolRetryBudget.remainingNanos(callback),
-                () -> onBudgetExpired(callback));
+        synchronized (PENDING) {
+            Entry entry = new Entry(maidId(callback), handle, notifier);
+            Entry previous = PENDING.put(callback, entry);
+            if (previous != null) {
+                previous.notifier.finish();
+            }
+            // 续接只重排剩余时间；HTTP 完成后仍保留计时，直至业务回调收尾。
+            notifier.scheduleDeadline(ProtocolRetryBudget.remainingNanos(callback),
+                    () -> onBudgetExpired(callback, entry, request));
+        }
     }
 
-    private static void unregister(LLMCallback callback) {
+    public static void finishConversation(LLMCallback callback) {
         if (callback == null) {
             return;
         }
-        Entry entry = PENDING.remove(callback);
-        if (entry != null) {
-            entry.notifier.cancelDeadline();
-            entry.notifier.finish();
+        synchronized (PENDING) {
+            Entry entry = PENDING.remove(callback);
+            if (entry != null) {
+                entry.notifier.finish();
+            }
         }
     }
 
@@ -119,25 +127,47 @@ public final class ProtocolHttpBridge {
      * 只作废已经超时的那一轮：同一女仆可能同时还有别的、开始得更晚因而仍在预算内的对话，
      * 按女仆一刀切会把它们一起静默取消。
      */
-    private static void onBudgetExpired(LLMCallback callback) {
-        if (callback == null) {
-            return;
-        }
-        markTimedOut(callback);
-        for (LLMCallback pending : List.copyOf(PENDING.keySet())) {
-            if (TIMED_OUT.contains(pending) || ProtocolRetryBudget.isExpired(pending)) {
-                cancel(pending);
+    private static void onBudgetExpired(LLMCallback callback, Entry expected, HttpRequest request) {
+        synchronized (PENDING) {
+            if (PENDING.get(callback) != expected) {
+                return;
             }
+            expire(callback, request);
         }
     }
 
-    /**
-     * 该回调是否已被整轮超时终结；首次调用返回 {@code true}，之后恒为 {@code false}。
-     * <p>
-     * 标记不复位：同一次对话的后续工具轮次都不应再获得新的 240 秒。
-     */
-    public static boolean markTimedOut(LLMCallback callback) {
-        return callback != null && TIMED_OUT.add(callback);
+    private static void expire(LLMCallback callback, HttpRequest request) {
+        Throwable failure = timeoutFailure();
+        synchronized (TIMED_OUT) {
+            if (TIMED_OUT.containsKey(callback)) {
+                return;
+            }
+            TIMED_OUT.put(callback, failure);
+        }
+        cancel(callback);
+        callback.runOnServerThread(() -> {
+            if (!isInactive(callback)) {
+                callback.onFailure(request, failure, ErrorCode.REQUEST_RECEIVED_ERROR);
+            }
+        });
+    }
+
+    public static boolean wasTimedOut(LLMCallback callback) {
+        return callback != null && TIMED_OUT.containsKey(callback);
+    }
+
+    /** 超时后仅允许主动发出的那一次失败通知，丢弃工具或 HTTP 的迟到回调。 */
+    public static boolean acceptFailure(LLMCallback callback, Throwable failure) {
+        synchronized (TIMED_OUT) {
+            if (!TIMED_OUT.containsKey(callback)) {
+                return true;
+            }
+            if (failure != null && TIMED_OUT.get(callback) == failure) {
+                TIMED_OUT.put(callback, null);
+                return true;
+            }
+            return false;
+        }
     }
 
     /** 整轮预算耗尽时使用的统一失败原因。 */
@@ -190,11 +220,10 @@ public final class ProtocolHttpBridge {
      * 该回调是否应被静默丢弃。
      * <p>
      * 生命周期取消（实体离场 / 停服）不回退、也不触发业务失败回调；
-     * 整轮超时虽然同样取消了在途请求，但必须让超时原因走到 TLM 的失败回调上，
-     * 否则玩家看不到任何提示，因此这种情况不算静默取消。
+     * 整轮超时会主动派发失败通知，HTTP 迟到结果由 wasTimedOut 单独拦截。
      */
     public static boolean wasCancelled(LLMCallback callback) {
-        return callback != null && CANCELLED.contains(callback) && !TIMED_OUT.contains(callback);
+        return callback != null && CANCELLED.contains(callback) && !wasTimedOut(callback);
     }
 
     /** 请求终态后清除取消标记，避免回调对象长期被集合引用。 */

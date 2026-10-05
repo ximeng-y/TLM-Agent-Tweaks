@@ -115,6 +115,10 @@ public abstract class LLMOpenAIClientMixin {
     @Inject(method = "handle", at = @At("HEAD"), cancellable = true)
     private void tlmAgentTweaks$handleProtocolResponse(LLMCallback callback, HttpResponse<String> response,
                                                        Throwable throwable, HttpRequest request, CallbackInfo ci) {
+        if (ProtocolHttpBridge.wasTimedOut(callback)) {
+            ci.cancel();
+            return;
+        }
         if (ProtocolHttpBridge.wasCancelled(callback)) {
             // 取消是终态：消费掉标记，避免回调对象长期留在取消集合里。
             ProtocolHttpBridge.clearCancelled(callback);

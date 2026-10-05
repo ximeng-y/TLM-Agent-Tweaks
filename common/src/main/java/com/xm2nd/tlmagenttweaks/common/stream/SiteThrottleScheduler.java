@@ -311,9 +311,8 @@ public final class SiteThrottleScheduler implements SendGate {
             synchronized (lock) {
                 SiteState site = sites.get(siteId);
                 if (site != null
-                        && (site.waiting.remove(this) || site.queue.remove(this))
-                        && state.compareAndSet(STATE_PENDING, STATE_DISCARDED)) {
-                    action = send::onDiscarded;
+                        && (site.waiting.remove(this) || site.queue.remove(this))) {
+                    action = discard();
                 }
             }
             if (action != null) {
@@ -323,7 +322,8 @@ public final class SiteThrottleScheduler implements SendGate {
 
         /** 进入放行状态；返回锁外执行的回调，已终结时返回 null。 */
         private Runnable grant() {
-            if (!state.compareAndSet(STATE_PENDING, STATE_GRANTED)) {
+            if (!state.compareAndSet(STATE_PENDING, STATE_GRANTED)
+                    && !state.compareAndSet(STATE_QUEUED, STATE_GRANTED)) {
                 return null;
             }
             return send::onGranted;

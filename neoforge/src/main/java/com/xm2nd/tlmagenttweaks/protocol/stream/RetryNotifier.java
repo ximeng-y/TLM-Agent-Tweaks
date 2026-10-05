@@ -46,6 +46,7 @@ final class RetryNotifier implements StreamingHttpTransport.AttemptListener {
     private final LLMCallback callback;
     private final RequestRetryPolicy policy;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicBoolean deadlineClosed = new AtomicBoolean();
     private volatile ScheduledFuture<?> deadline;
 
     RetryNotifier(LLMCallback callback, RequestRetryPolicy policy) {
@@ -90,7 +91,7 @@ final class RetryNotifier implements StreamingHttpTransport.AttemptListener {
         }
         try {
             deadline = TIMER.schedule(() -> {
-                if (closed.compareAndSet(false, true)) {
+                if (deadlineClosed.compareAndSet(false, true)) {
                     try {
                         onExpire.run();
                     } catch (Throwable throwable) {
@@ -104,6 +105,7 @@ final class RetryNotifier implements StreamingHttpTransport.AttemptListener {
     }
 
     void cancelDeadline() {
+        deadlineClosed.set(true);
         ScheduledFuture<?> current = deadline;
         deadline = null;
         if (current != null) {
@@ -113,8 +115,13 @@ final class RetryNotifier implements StreamingHttpTransport.AttemptListener {
 
     /** 请求已进入终态：停止一切后续气泡刷新。 */
     void finish() {
-        closed.set(true);
+        stopNotifications();
         cancelDeadline();
+    }
+
+    /** HTTP 已结束，但整轮预算仍需覆盖随后的异步工具执行。 */
+    void stopNotifications() {
+        closed.set(true);
     }
 
     /**

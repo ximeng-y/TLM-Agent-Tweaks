@@ -14,22 +14,30 @@ import java.net.http.HttpRequest;
 /**
  * 在 TLM 回调的业务终态处结束整轮时间预算并清理请求登记。
  * <p>
- * 只做本 mod 自身的清理，不改变 TLM 任何行为，也不取消在途请求：
- * 取消由生命周期（实体离场 / 停服）负责，否则一次普通失败会被误判为取消而丢掉错误提示。
+ * 正常终态只清理本 mod 登记，不取消请求；整轮超时后丢弃迟到结果，
+ * 仅允许主动发出的超时失败通知进入 TLM 收尾。
  */
 @Mixin(value = LLMCallback.class, remap = false)
 public abstract class LLMCallbackMixin {
 
     /** 对话正常结束（写历史、给气泡、播报均在其后由 TLM 完成）。 */
-    @Inject(method = "onSuccess", at = @At("HEAD"))
+    @Inject(method = "onSuccess", at = @At("HEAD"), cancellable = true)
     private void tlmAgentTweaks$endConversation(ResponseChat responseChat, CallbackInfo ci) {
+        if (ProtocolHttpBridge.wasTimedOut((LLMCallback) (Object) this)) {
+            ci.cancel();
+            return;
+        }
         end();
     }
 
     /** 对话失败收尾。 */
-    @Inject(method = "onFailure", at = @At("HEAD"))
+    @Inject(method = "onFailure", at = @At("HEAD"), cancellable = true)
     private void tlmAgentTweaks$endConversationOnFailure(HttpRequest request, Throwable throwable,
                                                         int errorCode, CallbackInfo ci) {
+        if (!ProtocolHttpBridge.acceptFailure((LLMCallback) (Object) this, throwable)) {
+            ci.cancel();
+            return;
+        }
         end();
     }
 
@@ -39,6 +47,7 @@ public abstract class LLMCallbackMixin {
      */
     private void end() {
         LLMCallback self = (LLMCallback) (Object) this;
+        ProtocolHttpBridge.finishConversation(self);
         ProtocolRetryBudget.release(self);
         ProtocolHttpBridge.clearCancelled(self);
     }
