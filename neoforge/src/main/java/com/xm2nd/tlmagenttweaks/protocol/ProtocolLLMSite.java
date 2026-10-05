@@ -14,6 +14,7 @@ import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
 import com.xm2nd.tlmagenttweaks.common.protocol.UrlMode;
 
 import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -30,7 +31,7 @@ public class ProtocolLLMSite extends LLMOpenAISite {
     public ProtocolLLMSite(String id, ResourceLocation icon, String url, boolean enabled, String secretKey,
                            boolean hasThinkingField, Map<String, String> headers,
                            Map<String, ModelEntry> modelEntries, SiteProtocol protocol, UrlMode urlMode) {
-        super(id, icon, url, enabled, secretKey, hasThinkingField, headers, modelEntries);
+        super(id, icon, url, enabled, secretKey, hasThinkingField, headers, new HashMap<>(modelEntries));
         this.protocol = protocol;
         this.urlMode = urlMode;
     }
@@ -74,9 +75,11 @@ public class ProtocolLLMSite extends LLMOpenAISite {
                 Codec.unboundedMap(Codec.STRING, Codec.STRING).fieldOf(HEADERS).forGetter(LLMOpenAISite::headers),
                 MODELS_CODEC.fieldOf(MODELS).forGetter(LLMOpenAISite::modelEntries),
                 PROTOCOL_CODEC.optionalFieldOf(ProtocolSiteConfig.PROTOCOL, ProtocolSiteConfig.LEGACY_PROTOCOL)
-                        .forGetter(site -> ((ProtocolLLMSite) site).protocol()),
+                        .forGetter(site -> site instanceof ProtocolLLMSite configured
+                                ? configured.protocol() : ProtocolSiteConfig.LEGACY_PROTOCOL),
                 URL_MODE_CODEC.optionalFieldOf(ProtocolSiteConfig.URL_MODE, ProtocolSiteConfig.LEGACY_URL_MODE)
-                        .forGetter(site -> ((ProtocolLLMSite) site).urlMode())
+                        .forGetter(site -> site instanceof ProtocolLLMSite configured
+                                ? configured.urlMode() : ProtocolSiteConfig.LEGACY_URL_MODE)
         ).apply(instance, ProtocolLLMSite::new));
 
         @Override
