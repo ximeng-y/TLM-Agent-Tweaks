@@ -1,5 +1,9 @@
 {
   "gui.tlm_agent_tweaks.button.stats_entry.tip": "Agent Tweaks: Token Stats",
+  "gui.tlm_agent_tweaks.button.settings_entry.tip": "Agent Tweaks: Settings",
+  "gui.tlm_agent_tweaks.button.legacy_settings_entry.tip": "Agent Tweaks: Standalone Settings (Legacy Self-Talk has no unified navigation)",
+  "gui.tlm_agent_tweaks.navigation.tweaks.tooltip": "Agent Tweaks",
+  "gui.tlm_agent_tweaks.navigation.selftalk.tooltip": "Self-Talk Settings",
   "gui.tlm_agent_tweaks.button.compress_history": "Compress History",
   "gui.tlm_agent_tweaks.button.compress_history.pending": "Compressing…",
   "gui.tlm_agent_tweaks.button.price": "💰 Price",

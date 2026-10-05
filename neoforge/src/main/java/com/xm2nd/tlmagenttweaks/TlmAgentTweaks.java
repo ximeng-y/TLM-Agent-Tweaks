@@ -31,6 +31,8 @@ public class TlmAgentTweaks {
         // 客户端：服务端必装守卫（装了本 mod 的客户端连未安装的服务器时主动断开）
         if (FMLEnvironment.dist.isClient()) {
             NeoForge.EVENT_BUS.register(com.xm2nd.tlmagenttweaks.client.ServerPresenceGate.class);
+            NeoForge.EVENT_BUS.register(com.xm2nd.tlmagenttweaks.client.gui.SettingsNavigationController.class);
+            modEventBus.addListener(com.xm2nd.tlmagenttweaks.client.gui.SelfTalkNavigationBridge::onClientSetup);
         }
 
         // 客户端 Cloth Config 配置界面：反射注册（未装 cloth-config 时自动跳过）

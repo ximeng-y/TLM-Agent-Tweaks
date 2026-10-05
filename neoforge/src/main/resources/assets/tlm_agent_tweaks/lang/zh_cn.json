@@ -1,5 +1,9 @@
 {
   "gui.tlm_agent_tweaks.button.stats_entry.tip": "AI 功能增强：Token 统计",
+  "gui.tlm_agent_tweaks.button.settings_entry.tip": "AI 功能增强：设置入口",
+  "gui.tlm_agent_tweaks.button.legacy_settings_entry.tip": "AI 功能增强：独立设置入口（旧版 Self-Talk 无统一导航）",
+  "gui.tlm_agent_tweaks.navigation.tweaks.tooltip": "AI 功能增强",
+  "gui.tlm_agent_tweaks.navigation.selftalk.tooltip": "Self-Talk 设置",
   "gui.tlm_agent_tweaks.button.compress_history": "压缩聊天记录",
   "gui.tlm_agent_tweaks.button.compress_history.pending": "压缩中…",
   "gui.tlm_agent_tweaks.button.price": "💰 价格",
