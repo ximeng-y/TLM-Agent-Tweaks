@@ -321,7 +321,8 @@ class ProtocolAdaptersTest {
                          "content":[{"type":"text","text":"truncated"}],"stop_reason":"max_tokens"}
                         """));
         JsonObject thinkingRequest = JsonParser.parseString("""
-                        {"model":"m","messages":[],"thinking":{"type":"disabled"}}
+                        {"model":"m","messages":[{"role":"user","content":"hello"}],
+                         "thinking":{"type":"disabled"}}
                         """).getAsJsonObject();
         for (SiteProtocol protocol : new SiteProtocol[] {
                 SiteProtocol.RESPONSES, SiteProtocol.ANTHROPIC_MESSAGES}) {
