@@ -171,6 +171,20 @@ public final class ProtocolBridge {
         return new ProtocolHttpResponse(response, GSON.toJson(decoded.body()), true);
     }
 
+    /**
+     * 流式聚合成功后的统一归一化入口：与普通响应走同一套
+     * {@link ProtocolResponseDecoder} 与元数据保存逻辑，只执行一次。
+     *
+     * @return 标记为已归一化的响应，可直接重新进入原 handle，不会再被归一化
+     */
+    public static HttpResponse<String> normalizeAggregated(LLMOpenAISite site, HttpResponse<String> response,
+                                                           LLMCallback callback) throws ProtocolException {
+        if (isNormalized(response)) {
+            return response;
+        }
+        return normalizeResponse(site, response, callback);
+    }
+
     private static ProtocolException toProtocolException(String message, Throwable throwable) {
         if (throwable instanceof ProtocolException protocolException) {
             return protocolException;

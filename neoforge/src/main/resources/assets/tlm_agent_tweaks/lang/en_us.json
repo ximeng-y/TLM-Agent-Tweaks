@@ -71,6 +71,12 @@
   "message.tlm_agent_tweaks.price.cleared": "Price cleared for model %s",
   "message.tlm_agent_tweaks.price.invalid_model": "Site or model not in the available list, save rejected",
 
+  "chat.tlm_agent_tweaks.retry": "Request failed, retrying in %s s (attempt %s/%s)",
+  "chat.tlm_agent_tweaks.retry.rate_limited": "Too many requests, retrying in %s s (attempt %s/%s)",
+  "chat.tlm_agent_tweaks.retry.fallback": "Stream interrupted, retrying without streaming…",
+  "chat.tlm_agent_tweaks.retry.site_queue": "Site is busy, queued for sending (retried %s/%s)",
+  "chat.tlm_agent_tweaks.retry.site_queue.first": "Site is busy, queued for sending…",
+
   "config.tlm_agent_tweaks.title": "Agent Tweaks",
   "config.tlm_agent_tweaks.threshold": "Manual Compress Threshold (K tokens)",
   "config.tlm_agent_tweaks.threshold.tooltip": "Manual compression is only allowed when the last chat token usage reaches this value, to prevent wasting tokens on repeated compression",
@@ -79,5 +85,7 @@
   "config.tlm_agent_tweaks.admin_level": "Stats view permission level",
   "config.tlm_agent_tweaks.admin_level.tooltip": "OP permission level required to view token stats and set model prices (0-4)",
   "config.tlm_agent_tweaks.record_summary": "Count summary requests in stats",
-  "config.tlm_agent_tweaks.record_summary.tooltip": "History compression summary requests also consume tokens; they are counted by default"
+  "config.tlm_agent_tweaks.record_summary.tooltip": "History compression summary requests also consume tokens; they are counted by default",
+  "config.tlm_agent_tweaks.retry_enabled": "Enable automatic request retry",
+  "config.tlm_agent_tweaks.retry_enabled.tooltip": "When enabled, 429 and 500/502/503/504 are retried up to 2 extra times with a fixed 5 s wait each (Retry-After is ignored); requests arriving during a site cooldown are queued and sent later. When disabled, no retry or site cooldown is applied, but falling back to a non-streaming resend after a stream interruption is unaffected"
 }
