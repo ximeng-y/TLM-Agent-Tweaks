@@ -5,6 +5,8 @@ import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.LLMOpenAIS
 import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
 import com.xm2nd.tlmagenttweaks.common.stream.StreamingHttpTransport;
 import com.xm2nd.tlmagenttweaks.protocol.ProtocolBridge;
+import net.minecraft.server.level.ServerLevel;
+import net.neoforged.neoforge.server.ServerLifecycleHooks;
 
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -14,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -31,19 +34,39 @@ public final class ProtocolHttpBridge {
 
     private static final StreamingHttpTransport TRANSPORT = new StreamingHttpTransport();
     private static final Map<LLMCallback, Entry> PENDING = new ConcurrentHashMap<>();
-    private static final Set<LLMCallback> CANCELLED = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private static final Set<LLMCallback> CANCELLED =
+            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+    private static volatile boolean stopping;
 
     private ProtocolHttpBridge() {
     }
 
     public static CompletableFuture<HttpResponse<String>> send(HttpClient client, HttpRequest request,
                                                                LLMOpenAISite site, LLMCallback callback) {
+        if (isInactive(callback)) {
+            return CompletableFuture.failedFuture(new StreamingHttpTransport.CancelledException());
+        }
         SiteProtocol protocol = ProtocolBridge.protocolOf(site);
         ProtocolStreamListener listener = new ProtocolStreamListener(site, callback);
         StreamingHttpTransport.FrozenRequest frozen = StreamingHttpTransport.freeze(request);
         StreamingHttpTransport.Call call = TRANSPORT.sendCall(client, frozen, protocol, listener);
         register(callback, call);
+        // 发送与登记之间可能恰好发生实体离场，不能依赖只触发一次的离场事件兜底。
+        if (isInactive(callback)) {
+            cancel(callback);
+        }
         return call.future().whenComplete((response, throwable) -> unregister(callback));
+    }
+
+    public static boolean isInactive(LLMCallback callback) {
+        if (callback == null || callback.getMaid() == null) {
+            return true;
+        }
+        var maid = callback.getMaid();
+        return stopping || !maid.isAlive() || maid.isRemoved()
+                || !(maid.level() instanceof ServerLevel level)
+                || level.getServer() != ServerLifecycleHooks.getCurrentServer()
+                || level.getServer().isStopped();
     }
 
     private static void register(LLMCallback callback, StreamingHttpTransport.Call call) {
@@ -78,10 +101,15 @@ public final class ProtocolHttpBridge {
      * 服务器停止时取消所有在途请求并清空登记表。取消不回退。
      */
     public static void cancelAll() {
+        stopping = true;
         for (LLMCallback callback : List.copyOf(PENDING.keySet())) {
             cancel(callback);
         }
         PENDING.clear();
+    }
+
+    public static void onServerStarted() {
+        stopping = false;
     }
 
     /**

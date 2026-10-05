@@ -121,7 +121,9 @@ public abstract class LLMOpenAIClientMixin {
             ci.cancel();
             return;
         }
-        if (((Client) (Object) this).shouldStopChat(callback.getMaid())) {
+        if (ProtocolHttpBridge.isInactive(callback)
+                || ((Client) (Object) this).shouldStopChat(callback.getMaid())) {
+            ProtocolHttpBridge.clearCancelled(callback);
             ci.cancel();
             return;
         }
