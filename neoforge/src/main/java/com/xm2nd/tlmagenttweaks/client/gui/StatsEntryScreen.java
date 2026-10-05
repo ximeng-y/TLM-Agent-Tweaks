@@ -8,8 +8,8 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.api.distmarker.OnlyIn;
 
 /**
- * 统计入口兜底界面：仅在未安装 Self-Talk 时由 💬 按钮打开。
- * （安装 Self-Talk 时统计入口按钮由条件 mixin 直接注入其设置屏）
+ * Agent Tweaks 设置页：承载 Token 统计入口，并在新版 Self-Talk 存在时
+ * 提供统一的左上角页面导航。
  */
 @OnlyIn(Dist.CLIENT)
 public class StatsEntryScreen extends Screen {
@@ -23,6 +23,9 @@ public class StatsEntryScreen extends Screen {
 
     @Override
     protected void init() {
+        // 与新版 Self-Talk 合装时，统一页签由本页自行注册
+        SettingsNavigationController.addTweaksPageTabs(this::addRenderableWidget);
+
         int cx = this.width / 2;
         int cy = this.height / 2;
         this.addRenderableWidget(Button.builder(
