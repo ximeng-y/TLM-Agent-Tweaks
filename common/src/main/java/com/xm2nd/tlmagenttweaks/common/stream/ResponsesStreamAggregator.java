@@ -59,11 +59,12 @@ public final class ResponsesStreamAggregator implements ProtocolStreamAggregator
             case "response.failed" -> {
                 JsonObject response = requiredResponse(event);
                 status = StreamJson.stringOr(response, "status", "failed");
-                throw new ProtocolException("Responses stream failed: " + errorMessage(response.get("error")));
+                throw new StreamServiceException("Responses stream failed: " + errorMessage(response.get("error")));
             }
             case "error" -> {
                 error = event.deepCopy();
-                throw new ProtocolException("Responses stream error event: " + errorMessage(event.get("error")));
+                throw new StreamServiceException("Responses stream error event: "
+                        + errorMessage(event.has("error") ? event.get("error") : event));
             }
             default -> {
                 // 未知事件（含 annotations、reasoning summary part 等）不参与核心聚合。

@@ -498,7 +498,7 @@ public final class StreamingHttpTransport {
             } catch (Throwable throwable) {
                 Throwable cause = unwrap(throwable);
                 current.finish(null, cause);
-                if (streamPhase) {
+                if (streamPhase && !(cause instanceof StreamServiceException)) {
                     // 流式阶段断开、超时或缺终止标志：唯一允许触发非流式回退的传输类失败。
                     fallback(cause);
                 } else {
