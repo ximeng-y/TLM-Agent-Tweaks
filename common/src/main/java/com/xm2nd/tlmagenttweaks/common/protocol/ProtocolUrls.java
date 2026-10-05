@@ -28,7 +28,7 @@ public final class ProtocolUrls {
             return uri;
         }
 
-        String path = uri.getPath();
+        String path = uri.getRawPath();
         if (path == null || path.isEmpty()) {
             path = "/";
         }
@@ -36,6 +36,7 @@ public final class ProtocolUrls {
             path = "/" + path;
         }
 
+        path = stripTrailingSlash(path);
         String lowerPath = path.toLowerCase(Locale.ROOT);
         if (endsWithEndpoint(lowerPath, protocol)) {
             return rebuild(uri, stripTrailingSlash(path));

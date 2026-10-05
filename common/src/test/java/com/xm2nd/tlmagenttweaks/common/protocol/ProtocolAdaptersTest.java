@@ -46,6 +46,25 @@ class ProtocolAdaptersTest {
     }
 
     @Test
+    void preservesEscapedPathsAndAvoidsDuplicatingTrailingSlashEndpoints() throws Exception {
+        for (SiteProtocol protocol : SiteProtocol.values()) {
+            String suffix = switch (protocol) {
+                case CHAT_COMPLETIONS -> "/chat/completions";
+                case RESPONSES -> "/responses";
+                case ANTHROPIC_MESSAGES -> "/messages";
+            };
+            String endpoint = "https://example.test/proxy%2Ftenant/v1" + suffix;
+            assertEquals(URI.create(endpoint + "?mode=a%20b"), ProtocolUrls.resolve(
+                    protocol, UrlMode.BASE, endpoint + "///?mode=a%20b"));
+            assertEquals(URI.create(endpoint + "/"), ProtocolUrls.resolve(
+                    protocol, UrlMode.EXACT, endpoint + "/"));
+        }
+        assertEquals(URI.create("https://example.test/path%20space/responses"),
+                ProtocolUrls.resolve(SiteProtocol.RESPONSES, UrlMode.BASE,
+                        "https://example.test/path%20space/"));
+    }
+
+    @Test
     void responsesToolLoopReplaysOpaqueItemsAcrossCallbacks() throws Exception {
         ProtocolMetadataStore store = new ProtocolMetadataStore();
         JsonObject canonical = canonicalWithToolHistory();

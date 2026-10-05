@@ -169,6 +169,35 @@ public class LLMSiteProtocolScreen extends Screen {
     }
 
     @Override
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (this.openMenu != Menu.NONE) {
+            // 菜单绘制在最上层，点击也必须优先交给它，不能由下面先注册的按钮截获。
+            List<FlatColorButton> options = this.openMenu == Menu.PROTOCOL
+                    ? this.protocolOptions : this.urlModeOptions;
+            for (FlatColorButton option : options) {
+                if (option.mouseClicked(mouseX, mouseY, button)) {
+                    this.setFocused(option);
+                    return true;
+                }
+            }
+            this.openMenu = Menu.NONE;
+            this.updateMenuLayout();
+            return true;
+        }
+        return super.mouseClicked(mouseX, mouseY, button);
+    }
+
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (keyCode == 256 && this.openMenu != Menu.NONE) {
+            this.openMenu = Menu.NONE;
+            this.updateMenuLayout();
+            return true;
+        }
+        return super.keyPressed(keyCode, scanCode, modifiers);
+    }
+
+    @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         this.renderBackground(graphics, mouseX, mouseY, partialTick);
         graphics.fillGradient(0, 0, this.width, this.height, 0xC0101010, 0xC0101010);
