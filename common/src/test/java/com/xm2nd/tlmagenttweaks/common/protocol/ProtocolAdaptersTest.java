@@ -319,11 +319,16 @@ class ProtocolAdaptersTest {
                         {"id":"a","type":"message","role":"assistant","model":"m",
                          "content":[{"type":"text","text":"truncated"}],"stop_reason":"max_tokens"}
                         """));
-        assertThrows(ProtocolException.class, () -> ProtocolRequestEncoder.encode(
-                SiteProtocol.RESPONSES,
-                JsonParser.parseString("""
+        JsonObject thinkingRequest = JsonParser.parseString("""
                         {"model":"m","messages":[],"thinking":{"type":"disabled"}}
-                        """).getAsJsonObject(), new ProtocolMetadataStore(), SCOPE));
+                        """).getAsJsonObject();
+        for (SiteProtocol protocol : new SiteProtocol[] {
+                SiteProtocol.RESPONSES, SiteProtocol.ANTHROPIC_MESSAGES}) {
+            assertFalse(ProtocolRequestEncoder.encode(protocol, thinkingRequest,
+                    new ProtocolMetadataStore(), SCOPE).has("thinking"));
+        }
+        assertTrue(ProtocolRequestEncoder.encode(SiteProtocol.CHAT_COMPLETIONS, thinkingRequest,
+                new ProtocolMetadataStore(), SCOPE).has("thinking"));
     }
 
     @Test
