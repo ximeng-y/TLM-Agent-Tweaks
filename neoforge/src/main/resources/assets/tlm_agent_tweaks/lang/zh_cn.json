@@ -4,6 +4,13 @@
   "gui.tlm_agent_tweaks.button.compress_history.pending": "压缩中…",
   "gui.tlm_agent_tweaks.button.price": "💰 价格",
   "gui.tlm_agent_tweaks.button.token_stats": "Token 统计",
+  "gui.tlm_agent_tweaks.llm.protocol": "协议：%s",
+  "gui.tlm_agent_tweaks.llm.protocol.chat_completions": "Chat Completions",
+  "gui.tlm_agent_tweaks.llm.protocol.responses": "OpenAI Responses",
+  "gui.tlm_agent_tweaks.llm.protocol.anthropic_messages": "Anthropic Messages",
+  "gui.tlm_agent_tweaks.llm.url_mode": "URL 模式：%s",
+  "gui.tlm_agent_tweaks.llm.url_mode.exact": "完整端点",
+  "gui.tlm_agent_tweaks.llm.url_mode.base": "基地址",
 
   "gui.tlm_agent_tweaks.stats_entry.title": "AI 功能增强",
   "gui.tlm_agent_tweaks.stats.back": "返回",

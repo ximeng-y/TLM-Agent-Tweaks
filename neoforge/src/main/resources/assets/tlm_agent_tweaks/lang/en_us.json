@@ -4,6 +4,13 @@
   "gui.tlm_agent_tweaks.button.compress_history.pending": "Compressing…",
   "gui.tlm_agent_tweaks.button.price": "💰 Price",
   "gui.tlm_agent_tweaks.button.token_stats": "Token Stats",
+  "gui.tlm_agent_tweaks.llm.protocol": "Protocol: %s",
+  "gui.tlm_agent_tweaks.llm.protocol.chat_completions": "Chat Completions",
+  "gui.tlm_agent_tweaks.llm.protocol.responses": "OpenAI Responses",
+  "gui.tlm_agent_tweaks.llm.protocol.anthropic_messages": "Anthropic Messages",
+  "gui.tlm_agent_tweaks.llm.url_mode": "URL mode: %s",
+  "gui.tlm_agent_tweaks.llm.url_mode.exact": "Exact endpoint",
+  "gui.tlm_agent_tweaks.llm.url_mode.base": "Base URL",
 
   "gui.tlm_agent_tweaks.stats_entry.title": "Agent Tweaks",
   "gui.tlm_agent_tweaks.stats.back": "Back",
