@@ -17,6 +17,24 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 class ProtocolLLMSiteCodecTest {
 
     @Test
+    void originalTlmSitesRemainSerializableAndModelsRemainMutable() {
+        LLMOpenAISite original = new LLMOpenAISite("original",
+                ResourceLocation.fromNamespaceAndPath("tlm_agent_tweaks", "test"),
+                "https://example.test/custom", true, "", Map.of(),
+                List.of(new LLMOpenAISite.ModelEntry("model-1")));
+        var encoded = ProtocolLLMSite.Serializer.CODEC.encodeStart(NbtOps.INSTANCE, original).getOrThrow();
+        ProtocolLLMSite decoded = assertInstanceOf(ProtocolLLMSite.class,
+                ProtocolLLMSite.Serializer.CODEC.parse(NbtOps.INSTANCE, encoded).getOrThrow());
+        assertEquals(SiteProtocol.CHAT_COMPLETIONS, decoded.protocol());
+        assertEquals(UrlMode.EXACT, decoded.urlMode());
+        LLMOpenAISite adapted = ProtocolBridge.withProtocol(original, SiteProtocol.RESPONSES, UrlMode.BASE);
+        adapted.addModel("new-model");
+        assertEquals("new-model", adapted.modelEntries().get("new-model").name());
+        adapted.removeModel("new-model");
+        assertEquals(1, adapted.modelEntries().size());
+    }
+
+    @Test
     void codecRoundtripsProtocolAndUrlMode() {
         ProtocolLLMSite site = new ProtocolLLMSite(
                 "site-1",
