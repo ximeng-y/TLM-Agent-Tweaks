@@ -367,19 +367,13 @@ public final class ProtocolRequestEncoder {
     private static void requireMetadataOrReplaySafe(ProtocolMetadataStore metadataStore, Object conversationScope,
                                                     String metadataKey, JsonElement metadata, String protocolName)
             throws ProtocolException {
-        if (metadataKey == null || metadata != null) {
+        if (metadataKey == null || metadata != null || metadataStore == null || conversationScope == null) {
             return;
-        }
-        if (metadataStore == null || conversationScope == null) {
-            throw new ProtocolException(protocolName
-                    + " metadata context is unavailable; refusing incomplete history replay");
         }
         if (metadataStore.isReplayUncertain(conversationScope)) {
             throw new ProtocolException(protocolName
                     + " opaque metadata for historical tool calls is no longer available; refusing incomplete replay");
         }
-        throw new ProtocolException(protocolName
-                + " metadata for historical tool calls is missing; refusing incomplete replay");
     }
 
     private static String requiredString(JsonObject object, String field) throws ProtocolException {

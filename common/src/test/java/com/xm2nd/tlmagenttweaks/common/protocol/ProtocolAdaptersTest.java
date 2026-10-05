@@ -98,11 +98,38 @@ class ProtocolAdaptersTest {
         assertEquals("function_call", input.get(3).getAsJsonObject().get("type").getAsString());
         assertEquals("call_next", input.get(3).getAsJsonObject().get("call_id").getAsString());
 
-        // 其他女仆/站点作用域不能读取该 opaque 项。
+        // 没有 opaque 风险的新作用域允许按 canonical 工具历史安全重建。
         ProtocolConversationScope otherScope = new ProtocolConversationScope(
                 "maid-2", "site-1", SiteProtocol.RESPONSES);
-        assertThrows(ProtocolException.class, () -> ProtocolRequestEncoder.encode(
-                SiteProtocol.RESPONSES, continued, store, otherScope));
+        JsonObject otherRequest = ProtocolRequestEncoder.encode(
+                SiteProtocol.RESPONSES, continued, store, otherScope);
+        assertEquals("function_call", otherRequest.getAsJsonArray("input").get(2)
+                .getAsJsonObject().get("type").getAsString());
+    }
+
+    @Test
+    void legacyChatCompletionToolHistoryCanSwitchToNewProtocolsWithoutMetadata() throws Exception {
+        JsonObject canonical = canonicalWithToolHistory();
+        ProtocolMetadataStore store = new ProtocolMetadataStore();
+
+        JsonObject responses = ProtocolRequestEncoder.encode(
+                SiteProtocol.RESPONSES, canonical, store, SCOPE);
+        JsonArray responsesInput = responses.getAsJsonArray("input");
+        assertEquals("function_call", responsesInput.get(2).getAsJsonObject().get("type").getAsString());
+        assertEquals("call_old", responsesInput.get(2).getAsJsonObject().get("call_id").getAsString());
+        assertEquals("function_call_output",
+                responsesInput.get(3).getAsJsonObject().get("type").getAsString());
+
+        JsonObject anthropic = ProtocolRequestEncoder.encode(
+                SiteProtocol.ANTHROPIC_MESSAGES, canonical, store, SCOPE);
+        JsonArray messages = anthropic.getAsJsonArray("messages");
+        JsonArray assistantContent = messages.get(1).getAsJsonObject().getAsJsonArray("content");
+        assertEquals("tool_use", assistantContent.get(0).getAsJsonObject().get("type").getAsString());
+        assertEquals("call_old", assistantContent.get(0).getAsJsonObject().get("id").getAsString());
+        JsonArray toolResultContent = messages.get(2).getAsJsonObject().getAsJsonArray("content");
+        assertEquals("tool_result",
+                toolResultContent.get(0).getAsJsonObject().get("type").getAsString());
+        assertEquals("call_old", toolResultContent.get(0).getAsJsonObject().get("tool_use_id").getAsString());
     }
 
     @Test
