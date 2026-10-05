@@ -11,6 +11,7 @@ import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
 import com.xm2nd.tlmagenttweaks.common.protocol.ProtocolException;
 import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
 import com.xm2nd.tlmagenttweaks.protocol.ProtocolBridge;
+import com.xm2nd.tlmagenttweaks.protocol.stream.ProtocolHttpBridge;
 import com.xm2nd.tlmagenttweaks.stats.TokenStatsService;
 import com.google.gson.Gson;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
@@ -104,23 +105,32 @@ public abstract class LLMOpenAIClientMixin {
         if (requestError != null) {
             return CompletableFuture.failedFuture(requestError);
         }
-        return client.sendAsync(request, bodyHandler);
+        try {
+            return ProtocolHttpBridge.send(client, request, this.site, callback);
+        } catch (Throwable throwable) {
+            return CompletableFuture.failedFuture(throwable);
+        }
     }
 
     @Inject(method = "handle", at = @At("HEAD"), cancellable = true)
     private void tlmAgentTweaks$handleProtocolResponse(LLMCallback callback, HttpResponse<String> response,
                                                        Throwable throwable, HttpRequest request, CallbackInfo ci) {
+        if (ProtocolHttpBridge.wasCancelled(callback)) {
+            // 取消是终态：消费掉标记，避免回调对象长期留在取消集合里。
+            ProtocolHttpBridge.clearCancelled(callback);
+            ci.cancel();
+            return;
+        }
         if (((Client) (Object) this).shouldStopChat(callback.getMaid())) {
             ci.cancel();
             return;
         }
-        if (response == null || throwable != null || response.statusCode() < 200 || response.statusCode() >= 300) {
-            tlmAgentTweaks$recordUsage(callback, response, throwable);
-            return;
-        }
-        if (!ProtocolBridge.isNormalized(response)) {
+        ProtocolHttpBridge.clearCancelled(callback);
+        boolean successful = throwable == null && response != null
+                && response.statusCode() >= 200 && response.statusCode() < 300;
+        if (successful && !ProtocolBridge.isNormalized(response)) {
             try {
-                HttpResponse<String> normalized = ProtocolBridge.normalizeResponse(this.site, response, callback);
+                HttpResponse<String> normalized = ProtocolBridge.normalizeAggregated(this.site, response, callback);
                 if (normalized != response) {
                     this.handle(callback, normalized, throwable, request);
                     ci.cancel();
