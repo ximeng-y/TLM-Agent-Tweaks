@@ -17,7 +17,7 @@
 1. **AI 功能增强配置栏**：在 TLM 的 Cloth Config 设置页「AI 功能」大类下追加与 LLM/TTS/STT 并列的「AI 功能增强」子栏目（挂载方式与 Self-Talk 一致）。
 2. **手动压缩聊天记录**：在历史聊天记录界面「清空聊天记录」按钮上方新增「压缩聊天记录」按钮，调用车万女仆原生 LLM 摘要压缩；管理员可在配置栏设置阈值（K token），上次对话用量未达阈值时不允许压缩，防止反复压缩浪费 token。压缩成功后 TLM 会将用量计数清零，天然防连点。
 3. **token 明细统计**：按输入 / 输出 / 缓存命中 / 缓存写入四类记录每次 LLM 请求（覆盖普通聊天、自言自语、互聊、自动人设、知识库问答、历史压缩摘要），兼容 OpenAI（`prompt_tokens_details.cached_tokens`）、DeepSeek（`prompt_cache_hit_tokens`）、Anthropic 系代理（`cache_creation_input_tokens`）三种缓存计费字段口径。管理员可在 TLM 站点编辑器里点「💰 价格」为每个模型设置四类单价，支持 CNY / USD 双币种，**两币种独立存储、不按汇率换算**。
-4. **Token 统计详情页**：入口在 AI 聊天窗口的 💬 按钮（未装 Self-Talk 时由本 mod 注册该按钮；装了 Self-Talk 时复用其按钮并在其设置屏内追加「Token 统计」按钮，两者互不冲突、互不为前置）。仅管理员（默认 OP 2 级，可配置）可查看，包含三视图：
+4. **统一设置入口与 Token 统计详情页**：AI 聊天窗口提供 Agent Tweaks 设置页；与新版 Self-Talk 合装时，由 Self-Talk 的 💬 物理入口统一进入，并用左上角两个图标页签切换 Agent Tweaks / Self-Talk，Self-Talk 原有业务界面不迁移。仅管理员（默认 OP 2 级，可配置）可查看统计，包含三视图：
    - **玩家排行**：一玩家一行 + 四色横向堆叠柱状图；
    - **玩家明细**：四类 token、缓存命中率、CNY/USD 双币种消费金额（均点击排行行进入，‹ › 切换玩家）；
    - **服务器总览**：粒度（时间窗口）可选 1/3/7/14/30/60/90/180/365day/all，窗口内按天出柱（180d/365d 自动按周、all 按月合并），四色竖向堆叠柱 + CNY/USD 双线成本折线图。
@@ -72,9 +72,12 @@ neoforge/   NeoForge 21.1 薄壳：入口/配置/mixin/网络/GUI/Cloth 集成
 ## 与 Maid Self-Talk 的兼容
 
 - 互不为前置、可同装也可只装其一；
-- AI 聊天窗口左侧第 4 槽的 💬 按钮：谁装了 Self-Talk 就由谁注册（互斥注册，不重叠）；
-- 装 Self-Talk 时，「Token 统计」按钮经 `@Pseudo` mixin（字符串目标 + 目标类不存在时自动跳过）注入其玩家设置屏底部，不与其原有 4 个开关按钮及提示文字重叠；
-- 双方 mixin 目标类完全不相交（本 mod 只注入 `LLMOpenAIClient.handle`、TLM 的三个界面与压缩管理器；Self-Talk 注入 `MaidAIChatManager.normalChat`、`LLMCallback` 等），无注入冲突；
+- 未装 Self-Talk 时，本 mod 在 AI 聊天窗口注册第 4 槽的 🧩 独立设置入口；
+- 与提供 `SelfTalkSettingsBridge` 的新版 Self-Talk 合装时，Self-Talk 保留并注册第 4 槽 💬 物理入口，点击后委托本 mod 打开统一导航；Agent Tweaks 与 Self-Talk 页面保持为两个真实独立 Screen，通过左上角 `20x20` 图标页签切换，页签位于 `(6, 30)` 并提供完整 tooltip；
+- 切出 Self-Talk 前由导航调用桥的 `prepareForNavigation`：有浮层时禁止切换，其余情况先保存 Prompt 再切换；每次重新进入 Self-Talk 都新建页面以重新请求配置，不缓存旧 dirty 回包守卫；
+- ESC 返回原始 AI 聊天屏；Token 统计页的返回目标为 Agent Tweaks 设置页；
+- 与不提供桥的旧版 Self-Talk 合装时，保留其第 4 槽原入口，本 mod 使用第 5 槽 🧩 提供独立设置入口；旧版无统一导航提示由入口 tooltip 与本文档说明，避免静默丢失入口；
+- Self-Talk 自身业务代码不迁移；当前统一导航仅在 NeoForge 1.21.1 侧实现，Forge 1.20.1 迁移尚未覆盖；
 - 已知微小行为：手动压缩的摘要回调会被 Self-Talk 视作一次「玩家聊天结束」而重置其聊天状态标记，影响可忽略。
 
 ## 统计口径备注
