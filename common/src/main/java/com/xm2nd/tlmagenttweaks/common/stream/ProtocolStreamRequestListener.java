@@ -17,7 +17,7 @@ public interface ProtocolStreamRequestListener {
     }
 
     /**
-     * 流式成功聚合后、进入原 TLM 响应处理前触发一次。
+     * 本次请求在流式通道内成功拿到可解码的完整响应后、进入原 TLM 响应处理前触发一次。
      * 失败、取消、回退到非流式成功时不触发（回退后最终结果由原处理路径负责）。
      */
     default void onAggregated(String requestId, SiteProtocol protocol, JsonObject rawResponse) {

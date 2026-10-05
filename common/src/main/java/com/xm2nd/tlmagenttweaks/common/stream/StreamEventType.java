@@ -12,9 +12,9 @@ public enum StreamEventType {
     REASONING_DELTA,
     /** 流式传输失败，即将回退非流式；订阅方应清空已展示的增量。 */
     FALLBACK,
-    /** 已聚合出完整结果。 */
+    /** 请求最终成功（流式聚合成功，或非流式回退/直返 JSON 成功）。 */
     COMPLETED,
-    /** 流式与回退均失败，作为最终失败上报。 */
+    /** 最终失败：回退仍失败，或最终拿到的是 HTTP 错误响应。 */
     FAILED,
     /** 调用方主动取消，不发生回退。 */
     CANCELLED
