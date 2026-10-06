@@ -6,6 +6,7 @@
   "mixins": [
     "LLMOpenAIClientMixin",
     "LLMCallbackMixin",
+    "LLMClientMixin",
     "HistorySummaryManagerInvoker"
   ],
   "client": [

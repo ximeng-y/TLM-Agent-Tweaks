@@ -2,6 +2,7 @@ package com.xm2nd.tlmagenttweaks.mixin;
 
 import com.github.tartaricacid.touhoulittlemaid.ai.manager.entity.LLMCallback;
 import com.github.tartaricacid.touhoulittlemaid.ai.agent.tool.ITool;
+import com.github.tartaricacid.touhoulittlemaid.ai.service.ResponseCallback;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.LLMOpenAIClient;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.LLMOpenAISite;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.request.ChatCompletion;
@@ -112,26 +113,40 @@ public abstract class LLMOpenAIClientMixin {
         }
     }
 
+    @Redirect(method = "onTextCall", at = @At(value = "INVOKE",
+            target = "com/github/tartaricacid/touhoulittlemaid/ai/service/ResponseCallback.onSuccess"
+                    + "(Ljava/lang/Object;)V"))
+    private void tlmAgentTweaks$dispatchTextSuccess(ResponseCallback callback, Object responseChat) {
+        // 覆盖空文本与非空文本两处最终成功调用；非 LLMCallback 保持原样调用。
+        if (callback instanceof LLMCallback llmCallback) {
+            ProtocolHttpBridge.dispatchSuccess(llmCallback, responseChat);
+        } else {
+            callback.onSuccess(responseChat);
+        }
+    }
+
+    @Redirect(method = "lambda$handle$1", at = @At(value = "INVOKE",
+            target = "com/github/tartaricacid/touhoulittlemaid/ai/manager/entity/LLMCallback.onFailure"
+                    + "(Ljava/net/http/HttpRequest;Ljava/lang/Throwable;I)V"))
+    private void tlmAgentTweaks$dispatchHandleFailure(LLMCallback callback, HttpRequest request,
+                                                      Throwable throwable, int errorCode) {
+        // Token 超限与无 choice 两处失败统一进入失败派发。
+        ProtocolHttpBridge.dispatchFailure(callback, request, throwable, errorCode);
+    }
+
     @Inject(method = "handle", at = @At("HEAD"), cancellable = true)
     private void tlmAgentTweaks$handleProtocolResponse(LLMCallback callback, HttpResponse<String> response,
                                                        Throwable throwable, HttpRequest request, CallbackInfo ci) {
-        if (ProtocolHttpBridge.wasTimedOut(callback)) {
-            ci.cancel();
-            return;
-        }
-        if (ProtocolHttpBridge.wasCancelled(callback)) {
-            // 取消是终态：消费掉标记，避免回调对象长期留在取消集合里。
-            ProtocolHttpBridge.clearCancelled(callback);
+        // 取消/超时/正常完成是持久终态：丢弃迟到结果，不再消费标记。
+        if (ProtocolHttpBridge.isTerminal(callback)) {
             ci.cancel();
             return;
         }
         if (ProtocolHttpBridge.isInactive(callback)
                 || ((Client) (Object) this).shouldStopChat(callback.getMaid())) {
-            ProtocolHttpBridge.clearCancelled(callback);
             ci.cancel();
             return;
         }
-        ProtocolHttpBridge.clearCancelled(callback);
         boolean successful = throwable == null && response != null
                 && response.statusCode() >= 200 && response.statusCode() < 300;
         if (successful && !ProtocolBridge.isNormalized(response)) {
@@ -144,13 +159,15 @@ public abstract class LLMOpenAIClientMixin {
                 }
             } catch (ProtocolException e) {
                 tlmAgentTweaks$recordUsage(callback, response, throwable);
-                callback.onFailure(request, new Throwable("Protocol response decode failed: " + e.getMessage(), e),
+                ProtocolHttpBridge.dispatchFailure(callback, request,
+                        new Throwable("Protocol response decode failed: " + e.getMessage(), e),
                         ErrorCode.JSON_DECODE_ERROR);
                 ci.cancel();
                 return;
             } catch (Throwable t) {
                 tlmAgentTweaks$recordUsage(callback, response, throwable);
-                callback.onFailure(request, new Throwable("Protocol response decode failed", t),
+                ProtocolHttpBridge.dispatchFailure(callback, request,
+                        new Throwable("Protocol response decode failed", t),
                         ErrorCode.JSON_DECODE_ERROR);
                 ci.cancel();
                 return;
