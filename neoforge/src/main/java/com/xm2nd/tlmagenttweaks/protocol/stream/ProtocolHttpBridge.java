@@ -19,7 +19,6 @@ import java.net.http.HttpTimeoutException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
@@ -32,9 +31,14 @@ import java.util.concurrent.ConcurrentHashMap;
  * （状态码重试与非流式回退），因此这里只需要登记一次取消句柄。
  * <p>
  * 统一终态：正常完成、失败完成、静默取消、预算到期都在本桥上收口。
- * 终态由 取消标记（{@link #CANCELLED}）、超时标记（{@link #TIMED_OUT}）与
- * 完成标记（{@link #FINISHED}）三类弱引用状态决定，设置后不再清除，
- * 只随回调对象被回收而消失。
+ * 终态由单一弱引用状态 {@link #TERMINAL} 决定（值见 {@link #STATE_FINISHED} 等常量），
+ * 设置后不再清除，只随回调对象被回收而消失。
+ * <p>
+ * 完成与超时的竞争认领是原子的：响应线程认领 {@code finished}、deadline 线程认领
+ * {@code timed_out}，两者用 {@code putIfAbsent} 抢占同一个状态位，只有一个获胜者
+ * 拥有唯一派发权，避免「响应被超时吞掉、超时被完成吞掉」的双杀交错。
+ * 显式 {@code cancel} / {@code complete} 是业务主动动作，强制覆盖任何竞争状态，
+ * 从而抑制尚未派发的超时/成功/失败通知。
  * <p>
  * 不维护 per-maid 的第二个索引：按女仆取消时直接遍历请求规模很小的 {@link #PENDING}
  * 并按不可变 maidId 过滤，避免异步 unregister 与主线程取消并发读写集合。
@@ -50,24 +54,21 @@ public final class ProtocolHttpBridge {
     private static final StreamingHttpTransport TRANSPORT = new StreamingHttpTransport(null, GATE);
     private static final Map<LLMCallback, Entry> PENDING = new ConcurrentHashMap<>();
     /**
-     * 显式/生命周期取消标记：弱引用，一旦设置不再清除。
-     * 业务主动取消（{@link #cancel}）与实体离场/停服都落到这里；
-     * 只要标记还在，发送、结果派发与迟到回调一律被静默丢弃。
+     * 终态状态机：弱引用，键为回调实例。值仅允许 {@link #STATE_FINISHED}、
+     * {@link #STATE_TIMED_OUT}、{@link #STATE_CANCELLED} 三种；空值表示仍在运行。
+     * 竞争认领（完成/超时）用 {@code putIfAbsent} 抢占，只产生一个获胜者；
+     * 业务 cancel / complete 用强制写入覆盖竞争状态。
      */
-    private static final Set<LLMCallback> CANCELLED =
-            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+    private static final Map<LLMCallback, String> TERMINAL = new WeakHashMap<>();
+    private static final String STATE_FINISHED = "finished";
+    private static final String STATE_TIMED_OUT = "timed_out";
+    private static final String STATE_CANCELLED = "cancelled";
     /**
-     * 已被整轮超时终结的回调：值保留唯一一次派发的超时异常对象，作为合法超时通知的识别许可。
+     * 超时派发许可：值保留唯一一次派发的超时异常对象，作为合法超时通知的识别许可。
      * 只上报一次最终失败；许可消耗后值置 null，但键保留（弱引用），迟到结果仍被丢弃。
      */
-    private static final Map<LLMCallback, Throwable> TIMED_OUT =
+    private static final Map<LLMCallback, Throwable> TIMED_OUT_FAILURE =
             Collections.synchronizedMap(new WeakHashMap<>());
-    /**
-     * 正常终态标记：统一成功/失败派发与业务 {@code complete()} 都会落到这里。
-     * 阻断「HTTP 已结束但业务派发尚未执行」与正常完成后迟到的结果重新进入业务。
-     */
-    private static final Set<LLMCallback> FINISHED =
-            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
     private static volatile boolean stopping;
 
     private ProtocolHttpBridge() {
@@ -138,24 +139,70 @@ public final class ProtocolHttpBridge {
         }
     }
 
+    /** 读取回调的终态状态；空值表示仍在运行。与认领/覆盖共用 {@link #TERMINAL} 同一把锁，保证读-写原子。 */
+    private static String stateOf(LLMCallback callback) {
+        if (callback == null) {
+            return null;
+        }
+        synchronized (TERMINAL) {
+            return TERMINAL.get(callback);
+        }
+    }
+
     /**
-     * 关闭该回调整轮登记：移除在途登记、关闭 deadline 与后续等待提示、释放整轮预算，
-     * 并打上完成标记。幂等；不发送成功或失败回调，不操作历史/业务 pending/互聊链/气泡。
+     * 竞争认领：仅在当前无任何终态时写入。返回 {@code true} 表示本线程是第一个
+     * 认领者（获胜者），拥有唯一派发权；已被另一竞争方（完成/超时）抢占时返回
+     * {@code false}，调用方应放弃派发且不再打标记。
+     */
+    private static boolean claimTerminal(LLMCallback callback, String state) {
+        if (callback == null) {
+            return false;
+        }
+        synchronized (TERMINAL) {
+            return TERMINAL.putIfAbsent(callback, state) == null;
+        }
+    }
+
+    /** 业务主动覆盖：无条件写入终态（取消/完成优先于竞争终态，抑制尚未派发的通知）。 */
+    private static void forceTerminal(LLMCallback callback, String state) {
+        if (callback == null) {
+            return;
+        }
+        synchronized (TERMINAL) {
+            TERMINAL.put(callback, state);
+        }
+    }
+
+    /**
+     * 关闭该回调整轮登记：移除在途登记、关闭 deadline 与后续等待提示、释放整轮预算。
+     * 幂等；不发送成功或失败回调，不操作历史/业务 pending/互聊链/气泡。
      * <p>
-     * 不清除已有取消/超时标记，防止迟到回调重新变成有效请求。
+     * 业务自决结束（{@link LlmConversationLifecycle#complete}）时强制打完成标记，
+     * 覆盖竞争状态并抑制尚未派发的通知。仅用于业务主动 complete；
+     * 超时自身的收尾路径不得走这里（会覆盖 {@link #STATE_TIMED_OUT}），由
+     * callbacks 兜底入口在 `wasTimedOut` 时跳过。
      */
     public static void finishConversation(LLMCallback callback) {
         if (callback == null) {
             return;
         }
-        synchronized (PENDING) {
-            Entry entry = PENDING.remove(callback);
-            if (entry != null) {
-                entry.notifier.finish();
-            }
+        forceTerminal(callback, STATE_FINISHED);
+        releaseResources(callback);
+    }
+
+    /**
+     * 兜底幂等收尾：仅在当前无终态时竞争认领完成标记并释放资源。
+     * 用于 {@code super.onSuccess}/{@code super.onFailure} 等重复进入路径——
+     * 不覆盖已存在的超时/取消/完成终态，因此不会破坏超时语义
+     * （超时后仅放行许可失败，其余迟到失败仍被丢弃）。
+     */
+    public static void tryFinish(LLMCallback callback) {
+        if (callback == null) {
+            return;
         }
-        FINISHED.add(callback);
-        ProtocolRetryBudget.release(callback);
+        if (claimTerminal(callback, STATE_FINISHED)) {
+            releaseResources(callback);
+        }
     }
 
     /**
@@ -174,23 +221,26 @@ public final class ProtocolHttpBridge {
     }
 
     /**
-     * 真正到期的唯一收尾：先登记超时标记并清理请求/计时器/预算，再派发唯一一次超时失败。
-     * 不依赖子类是否调用父类。超时不算显式取消，不写入 {@link #CANCELLED}。
+     * 真正到期的唯一收尾：先原子认领超时终态并清理请求/计时器/预算，再派发唯一一次超时失败。
+     * 若完成/取消已抢先认领（或业务已强制终态），则放弃派发，不产生第二次失败。
+     * 超时不算显式取消，不写入 {@link #STATE_CANCELLED}。
      */
     private static void expire(LLMCallback callback, HttpRequest request) {
         Throwable failure = timeoutFailure();
-        synchronized (TIMED_OUT) {
-            if (TIMED_OUT.containsKey(callback)) {
-                return;
-            }
-            TIMED_OUT.put(callback, failure);
+        // 竞争认领：若响应线程已认领 finished 或业务已取消，这里立即放弃。
+        if (!claimTerminal(callback, STATE_TIMED_OUT)) {
+            return;
+        }
+        synchronized (TIMED_OUT_FAILURE) {
+            TIMED_OUT_FAILURE.put(callback, failure);
         }
         releaseResources(callback);
         try {
             callback.runOnServerThread(() -> {
                 try {
-                    // 通知已排队但尚未执行时，业务可能又调用了 cancel / complete：此时抑制本次超时通知。
-                    if (isInactive(callback) || CANCELLED.contains(callback) || wasFinished(callback)) {
+                    // 通知已排队但尚未执行时，业务可能又调用了 cancel / complete：
+                    // 强制覆盖状态后这里不再等于 timed_out，本次超时通知被抑制。
+                    if (isInactive(callback) || stateOf(callback) != STATE_TIMED_OUT) {
                         return;
                     }
                     callback.onFailure(request, failure, ErrorCode.REQUEST_RECEIVED_ERROR);
@@ -206,7 +256,7 @@ public final class ProtocolHttpBridge {
     }
 
     public static boolean wasTimedOut(LLMCallback callback) {
-        return callback != null && TIMED_OUT.containsKey(callback);
+        return STATE_TIMED_OUT.equals(stateOf(callback));
     }
 
     /**
@@ -217,22 +267,22 @@ public final class ProtocolHttpBridge {
         if (callback == null) {
             return false;
         }
-        synchronized (TIMED_OUT) {
-            if (!TIMED_OUT.containsKey(callback)) {
-                return true;
-            }
-            return TIMED_OUT.get(callback) == failure;
+        if (!wasTimedOut(callback)) {
+            return true;
+        }
+        synchronized (TIMED_OUT_FAILURE) {
+            return TIMED_OUT_FAILURE.get(callback) == failure;
         }
     }
 
-    /** 唯一一次超时失败派发结束后关闭通知许可，但保留「已经超时」的弱引用标记。 */
+    /** 唯一一次超时失败派发结束后关闭通知许可，但保留「已经超时」的弱引用状态。 */
     private static void closeTimeoutLicense(LLMCallback callback, Throwable failure) {
         if (callback == null) {
             return;
         }
-        synchronized (TIMED_OUT) {
-            if (TIMED_OUT.get(callback) == failure) {
-                TIMED_OUT.put(callback, null);
+        synchronized (TIMED_OUT_FAILURE) {
+            if (TIMED_OUT_FAILURE.get(callback) == failure) {
+                TIMED_OUT_FAILURE.put(callback, null);
             }
         }
     }
@@ -244,22 +294,23 @@ public final class ProtocolHttpBridge {
     }
 
     /**
-     * 统一成功派发：在公共响应调用点（最终文本出口）由 business 方法之前完成本轮清理，
+     * 统一成功派发：原子认领完成终态后在公共响应调用点（最终文本出口）完成本轮清理，
      * 然后原样调用实际回调对象的覆盖方法。业务派发落在服务端主线程，执行前再次检查取消状态。
+     * 若超时/deadline 线程已抢先认领，则放弃派发，不会产生竞争双杀。
      *
      * @param responseChat 原始成功响应（保留原对象，不重建）
      */
     public static void dispatchSuccess(LLMCallback callback, Object responseChat) {
-        if (callback == null || isTerminal(callback)) {
+        if (callback == null || !claimTerminal(callback, STATE_FINISHED)) {
             return;
         }
-        finishConversation(callback);
+        releaseResources(callback);
         if (isInactive(callback)) {
             return;
         }
         try {
             callback.runOnServerThread(() -> {
-                if (isInactive(callback) || wasTimedOut(callback) || CANCELLED.contains(callback)) {
+                if (isInactive(callback) || isCancelled(callback)) {
                     return;
                 }
                 try {
@@ -274,20 +325,21 @@ public final class ProtocolHttpBridge {
     }
 
     /**
-     * 统一失败派发：在公共响应调用点（传输/HTTP/解析/业务校验失败）调用实际回调对象的覆盖方法，
-     * 保留原异常与错误码。调用前完成本轮清理；业务派发落在服务端主线程，执行前再次检查取消状态。
+     * 统一失败派发：原子认领完成终态后在公共响应调用点（传输/HTTP/解析/业务校验失败）
+     * 调用实际回调对象的覆盖方法，保留原异常与错误码。调用前完成本轮清理；
+     * 业务派发落在服务端主线程，执行前再次检查取消状态。
      */
     public static void dispatchFailure(LLMCallback callback, HttpRequest request, Throwable throwable, int errorCode) {
-        if (callback == null || isTerminal(callback)) {
+        if (callback == null || !claimTerminal(callback, STATE_FINISHED)) {
             return;
         }
-        finishConversation(callback);
+        releaseResources(callback);
         if (isInactive(callback)) {
             return;
         }
         try {
             callback.runOnServerThread(() -> {
-                if (isInactive(callback) || wasTimedOut(callback) || CANCELLED.contains(callback)) {
+                if (isInactive(callback) || isCancelled(callback)) {
                     return;
                 }
                 try {
@@ -345,10 +397,11 @@ public final class ProtocolHttpBridge {
      * 该回调是否被显式/生命周期取消（设置后持久保存，不再因消费一次结果而清除）。
      * <p>
      * 生命周期取消（实体离场 / 停服）与业务 {@code cancel} 都不回退、也不触发业务失败回调；
-     * 整轮超时不属于显式取消，由 {@link #wasTimedOut} 单独表达。
+     * 已超时后又显式取消仍视为取消（取消标记独立可查），取消优先抑制后续通知。
+     * 整轮超时不视为显式取消。
      */
     public static boolean wasCancelled(LLMCallback callback) {
-        return callback != null && CANCELLED.contains(callback) && !wasTimedOut(callback);
+        return STATE_CANCELLED.equals(stateOf(callback));
     }
 
     /** 公开生命周期查询：显式或生命周期取消状态；正常完成、真实超时不视为显式取消。 */
@@ -358,12 +411,12 @@ public final class ProtocolHttpBridge {
 
     /** 完成标记：统一成功/失败派发或业务 complete 已关闭该回调整轮登记。 */
     public static boolean wasFinished(LLMCallback callback) {
-        return callback != null && FINISHED.contains(callback);
+        return STATE_FINISHED.equals(stateOf(callback));
     }
 
     /** 终态判断：取消、超时、正常完成任一成立即视为已终态，不再进入发送与结果派发。 */
     public static boolean isTerminal(LLMCallback callback) {
-        return callback == null || wasCancelled(callback) || wasTimedOut(callback) || wasFinished(callback);
+        return stateOf(callback) != null;
     }
 
     /**
@@ -379,21 +432,20 @@ public final class ProtocolHttpBridge {
     }
 
     /**
-     * 取消登记并清理整轮资源。显式/生命周期取消时写取消标记与完成标记；
+     * 取消登记并清理整轮资源。显式/生命周期取消时强制写取消标记；
      * 终态标记与预算释放先于传输句柄取消，避免同步完成的回调看到旧状态。
      */
     private static void cancelAllWith(LLMCallback callback, boolean markCancelled) {
         if (markCancelled) {
-            CANCELLED.add(callback);
-            FINISHED.add(callback);
+            forceTerminal(callback, STATE_CANCELLED);
         }
         releaseResources(callback);
     }
 
     /**
      * 只作废在途请求/排队/计时器并释放预算，**不写任何终态标记**。
-     * 用于：已并发完成终态后的兜底清理（{@link #send} 后置检查）与超时收尾
-     * （{@link #expire} 需在派发成功后才由 dispatch 打完成标记，超时标记已单独登记）。
+     * 用于：已并发完成终态后的兜底清理（{@link #send} 后置检查）与超时/派发收尾
+     * （终态标记已由竞争认领或强制覆盖单独登记）。
      */
     private static void releaseResources(LLMCallback callback) {
         Entry entry;
@@ -409,12 +461,11 @@ public final class ProtocolHttpBridge {
     }
 
     /**
-     * 只作废请求/排队/计时器与完成标记，但**保留整轮预算**（世界卸载场景：同一回调
+     * 只作废请求/排队/计时器并写取消标记，但**保留整轮预算**（世界卸载场景：同一回调
      * 若意外存活，它的截止时间仍应按原轮次计算，不被重置）。
      */
     private static void cancelKeepingBudget(LLMCallback callback) {
-        CANCELLED.add(callback);
-        FINISHED.add(callback);
+        forceTerminal(callback, STATE_CANCELLED);
         Entry entry;
         synchronized (PENDING) {
             entry = PENDING.remove(callback);

@@ -15,6 +15,7 @@ import com.xm2nd.tlmagenttweaks.protocol.ProtocolBridge;
 import com.xm2nd.tlmagenttweaks.protocol.stream.ProtocolHttpBridge;
 import com.xm2nd.tlmagenttweaks.stats.TokenStatsService;
 import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -24,11 +25,13 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+import java.lang.reflect.Type;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 /**
  * 接管 TLM 的 OpenAI 兼容客户端出口，并在原响应处理前统一协议形态。
@@ -132,6 +135,42 @@ public abstract class LLMOpenAIClientMixin {
                                                       Throwable throwable, int errorCode) {
         // Token 超限与无 choice 两处失败统一进入失败派发。
         ProtocolHttpBridge.dispatchFailure(callback, request, throwable, errorCode);
+    }
+
+    /**
+     * handleResponse 是 {@code LLMClient} 接口的默认方法，其字节码只存在于接口内，
+     * 实现类 {@link LLMOpenAIClient} 未声明该方法——按 {@code method="handleResponse"} 注入
+     * 会被 Mixin 注入器忽略（目标类无该方法），required:true 下直接注入失败。
+     * 因此改为在实现类确实存在的方法 {@code handle} 体内的调用点上重定向，
+     * 复刻接口默认实现的成功/失败分支，并把三处失败统一进入失败派发。
+     */
+    @Redirect(method = "handle", at = @At(value = "INVOKE",
+            target = "com/github/tartaricacid/touhoulittlemaid/ai/service/llm/openai/LLMOpenAIClient.handleResponse"
+                    + "(Lcom/github/tartaricacid/touhoulittlemaid/ai/manager/entity/LLMCallback;"
+                    + "Ljava/net/http/HttpResponse;Ljava/lang/Throwable;Ljava/net/http/HttpRequest;"
+                    + "Ljava/util/function/Consumer;Ljava/lang/reflect/Type;)V"))
+    private void tlmAgentTweaks$dispatchHandleResponse(LLMOpenAIClient client, LLMCallback callback,
+                                                       HttpResponse<String> response, Throwable throwable,
+                                                       HttpRequest request, Consumer consumer, Type type) {
+        if (throwable != null) {
+            ProtocolHttpBridge.dispatchFailure(callback, request, throwable, ErrorCode.REQUEST_SENDING_ERROR);
+            return;
+        }
+        try {
+            int statusCode = response.statusCode();
+            if (200 <= statusCode && statusCode < 300) {
+                Object message = Client.GSON.fromJson(response.body(), type);
+                consumer.accept(message);
+            } else {
+                String message = "HTTP Error Code: %d, Response: %s".formatted(statusCode, response.body());
+                ProtocolHttpBridge.dispatchFailure(callback, request,
+                        new Throwable(message), ErrorCode.REQUEST_RECEIVED_ERROR);
+            }
+        } catch (JsonSyntaxException e) {
+            String message = "Exception %s, JSON is: %s".formatted(e.getLocalizedMessage(), response.body());
+            ProtocolHttpBridge.dispatchFailure(callback, request,
+                    new Throwable(message), ErrorCode.JSON_DECODE_ERROR);
+        }
     }
 
     @Inject(method = "handle", at = @At("HEAD"), cancellable = true)

@@ -15,8 +15,16 @@ import java.net.http.HttpRequest;
  * <p>
  * 主要终态已由公共响应调用点（统一成功/失败派发）负责；本注入只是兜底：
  * 那些走了 {@code super.onSuccess} / {@code super.onFailure} 的路径再次进入父类时，
- * 重复清理必须无副作用（{@link ProtocolHttpBridge#finishConversation} 幂等）。
+ * 重复清理必须无副作用（{@link ProtocolHttpBridge#tryFinish} 竞争认领，幂等）。
  * 正常派发已提前完成清理，父类收尾不再承担分散的预算释放职责。
+ * <p>
+ * 单状态终态语义：
+ * <ul>
+ *   <li>显式/生命周期取消优先于超时：已超时后又取消仍按取消处理，迟到结果静默丢弃；</li>
+ *   <li>超时后只放行超时收尾主动派发的那一次失败（许可异常对象），其余迟到失败一律丢弃；</li>
+ *   <li>正常完成（{@code finished}）不在此截断——成功派发已认领 {@code finished} 后，
+ *       真实的写历史/气泡逻辑还必须执行，这里只做一次幂等收尾。</li>
+ * </ul>
  */
 @Mixin(value = LLMCallback.class, remap = false)
 public abstract class LLMCallbackMixin {
@@ -34,7 +42,7 @@ public abstract class LLMCallbackMixin {
             return;
         }
         // 直接调用父类成功：兜底收尾。重复进入无副作用。
-        ProtocolHttpBridge.finishConversation((LLMCallback) (Object) this);
+        ProtocolHttpBridge.tryFinish((LLMCallback) (Object) this);
     }
 
     /**
@@ -56,6 +64,6 @@ public abstract class LLMCallbackMixin {
             ci.cancel();
             return;
         }
-        ProtocolHttpBridge.finishConversation((LLMCallback) (Object) this);
+        ProtocolHttpBridge.tryFinish((LLMCallback) (Object) this);
     }
 }

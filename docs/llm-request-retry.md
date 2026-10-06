@@ -47,11 +47,15 @@
 
 ## 统一终态与按会话取消
 
-一次逻辑对话有 4 种终态：**正常完成、失败完成、静默取消、预算到期**。本 mod 在协议桥把四种终态统一到同一份回调登记上收口：
+一次逻辑对话有 4 种终态：**正常完成、失败完成、静默取消、预算到期**。本 mod 在协议桥把四种终态统一到**单一弱引用状态位**（`finished` / `timed_out` / `cancelled`）上收口，设置后不再清除，只随回调被回收而消失：
 
 - **正常完成 / 失败完成**：由公共响应调用点（最终文本出口、传输/HTTP/解析失败、Token 超限、无 choice）统一识别，不要求回调调用父类。即使子类覆盖了 `onSuccess` / `onFailure` 且不调用父类，预算与 deadline 也会被可靠释放。
 - **静默取消**：业务方调用公开取消接口后，本回调的发送、排队、重试、deadline 与迟到结果全部被丢弃，不产生任何失败提示。
 - **预算到期**：只派发一次原有超时失败，随后迟到结果一律丢弃。
+
+**竞争认领是原子的**：完成与超时都在同一状态位上用 `putIfAbsent` 抢占，只有一个获胜者拥有唯一派发权，不存在「响应被超时吞掉、超时被完成吞掉」的双杀交错。显式 `cancel` / `complete` 是业务主动动作，**强制覆盖**竞争状态，从而抑制尚未派发的通知。
+
+**取消独立可查**：显式/生命周期取消与超时是两个独立状态。已超时后又显式取消仍视为取消（`isCancelled` 返回 `true`），取消优先抑制后续通知；单纯超时不视为取消。
 
 **工具响应本身不是终态**：HTTP 返回工具调用后预算继续保留，后续工具续接沿用原截止时间，不会重新计时。
 
@@ -125,5 +129,4 @@
 | `neoforge/` | `protocol/stream/RetryNotifier.java` | 切换到服务端主线程刷新等待气泡 + 预算到期通知 |
 | `neoforge/` | `protocol/stream/RetryBubble.java` | 气泡副文本 |
 | `neoforge/` | `mixin/LLMCallbackMixin.java` | 父类直接成功/失败路径的兜底收尾与迟到结果拦截 |
-| `neoforge/` | `mixin/LLMClientMixin.java` | `handleResponse` 三处失败入口的统一失败派发 |
-| `neoforge/` | `mixin/LLMOpenAIClientMixin.java` | 最终文本成功派发 + Token 超限/无 choice 失败派发 |
+| `neoforge/` | `mixin/LLMOpenAIClientMixin.java` | 最终文本成功派发 + Token 超限/无 choice 失败派发 + `handle` 内联复刻接口默认方法的三处失败派发 |

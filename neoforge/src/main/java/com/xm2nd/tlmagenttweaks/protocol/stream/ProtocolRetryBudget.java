@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 登记键是回调对象本身（弱引用，避免长期持有第三方回调）：普通 HTTP 成功不能删除登记，
  * 因为随后可能还会执行工具并继续请求。清理不依赖子类是否调用父类
  * （{@code onSuccess} / {@code onFailure}）：统一成功/失败派发、业务 {@code complete()}
- * 与整轮超时收尾都会调用 {@link ProtocolHttpBridge#finishConversation}，
+ * 与整轮超时收尾都会调用 {@link ProtocolHttpBridge} 的收尾收口，
  * 由它在移除 {@code PENDING} 登记时顺带释放预算。
  */
 public final class ProtocolRetryBudget {
@@ -57,7 +57,7 @@ public final class ProtocolRetryBudget {
         }
     }
 
-    /** 回调进入终态（统一成功/失败派发、{@link ProtocolHttpBridge#finishConversation}），结束本轮登记。 */
+    /** 回调进入终态（统一成功/失败派发、{@link ProtocolHttpBridge} 的收尾收口），结束本轮登记。 */
     public static void release(LLMCallback callback) {
         if (callback != null) {
             BUDGETS.remove(callback);
