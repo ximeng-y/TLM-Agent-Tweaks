@@ -2,6 +2,7 @@ package com.xm2nd.tlmagenttweaks.mixin;
 
 import com.github.tartaricacid.touhoulittlemaid.ai.manager.entity.LLMCallback;
 import com.github.tartaricacid.touhoulittlemaid.ai.agent.tool.ITool;
+import com.github.tartaricacid.touhoulittlemaid.ai.service.ResponseCallback;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.LLMOpenAIClient;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.LLMOpenAISite;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.request.ChatCompletion;
@@ -14,6 +15,7 @@ import com.xm2nd.tlmagenttweaks.protocol.ProtocolBridge;
 import com.xm2nd.tlmagenttweaks.protocol.stream.ProtocolHttpBridge;
 import com.xm2nd.tlmagenttweaks.stats.TokenStatsService;
 import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -23,11 +25,13 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+import java.lang.reflect.Type;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 /**
  * 接管 TLM 的 OpenAI 兼容客户端出口，并在原响应处理前统一协议形态。
@@ -112,26 +116,76 @@ public abstract class LLMOpenAIClientMixin {
         }
     }
 
+    @Redirect(method = "onTextCall", at = @At(value = "INVOKE",
+            target = "com/github/tartaricacid/touhoulittlemaid/ai/service/ResponseCallback.onSuccess"
+                    + "(Ljava/lang/Object;)V"))
+    private void tlmAgentTweaks$dispatchTextSuccess(ResponseCallback callback, Object responseChat) {
+        // 覆盖空文本与非空文本两处最终成功调用；非 LLMCallback 保持原样调用。
+        if (callback instanceof LLMCallback llmCallback) {
+            ProtocolHttpBridge.dispatchSuccess(llmCallback, responseChat);
+        } else {
+            callback.onSuccess(responseChat);
+        }
+    }
+
+    @Redirect(method = "lambda$handle$1", at = @At(value = "INVOKE",
+            target = "com/github/tartaricacid/touhoulittlemaid/ai/manager/entity/LLMCallback.onFailure"
+                    + "(Ljava/net/http/HttpRequest;Ljava/lang/Throwable;I)V"))
+    private void tlmAgentTweaks$dispatchHandleFailure(LLMCallback callback, HttpRequest request,
+                                                      Throwable throwable, int errorCode) {
+        // Token 超限与无 choice 两处失败统一进入失败派发。
+        ProtocolHttpBridge.dispatchFailure(callback, request, throwable, errorCode);
+    }
+
+    /**
+     * handleResponse 是 {@code LLMClient} 接口的默认方法，其字节码只存在于接口内，
+     * 实现类 {@link LLMOpenAIClient} 未声明该方法——按 {@code method="handleResponse"} 注入
+     * 会被 Mixin 注入器忽略（目标类无该方法），required:true 下直接注入失败。
+     * 因此改为在实现类确实存在的方法 {@code handle} 体内的调用点上重定向，
+     * 复刻接口默认实现的成功/失败分支，并把三处失败统一进入失败派发。
+     */
+    @Redirect(method = "handle", at = @At(value = "INVOKE",
+            target = "com/github/tartaricacid/touhoulittlemaid/ai/service/llm/openai/LLMOpenAIClient.handleResponse"
+                    + "(Lcom/github/tartaricacid/touhoulittlemaid/ai/manager/entity/LLMCallback;"
+                    + "Ljava/net/http/HttpResponse;Ljava/lang/Throwable;Ljava/net/http/HttpRequest;"
+                    + "Ljava/util/function/Consumer;Ljava/lang/reflect/Type;)V"))
+    private void tlmAgentTweaks$dispatchHandleResponse(LLMOpenAIClient client, LLMCallback callback,
+                                                       HttpResponse<String> response, Throwable throwable,
+                                                       HttpRequest request, Consumer consumer, Type type) {
+        if (throwable != null) {
+            ProtocolHttpBridge.dispatchFailure(callback, request, throwable, ErrorCode.REQUEST_SENDING_ERROR);
+            return;
+        }
+        try {
+            int statusCode = response.statusCode();
+            if (200 <= statusCode && statusCode < 300) {
+                Object message = Client.GSON.fromJson(response.body(), type);
+                consumer.accept(message);
+            } else {
+                String message = "HTTP Error Code: %d, Response: %s".formatted(statusCode, response.body());
+                ProtocolHttpBridge.dispatchFailure(callback, request,
+                        new Throwable(message), ErrorCode.REQUEST_RECEIVED_ERROR);
+            }
+        } catch (JsonSyntaxException e) {
+            String message = "Exception %s, JSON is: %s".formatted(e.getLocalizedMessage(), response.body());
+            ProtocolHttpBridge.dispatchFailure(callback, request,
+                    new Throwable(message), ErrorCode.JSON_DECODE_ERROR);
+        }
+    }
+
     @Inject(method = "handle", at = @At("HEAD"), cancellable = true)
     private void tlmAgentTweaks$handleProtocolResponse(LLMCallback callback, HttpResponse<String> response,
                                                        Throwable throwable, HttpRequest request, CallbackInfo ci) {
-        if (ProtocolHttpBridge.wasTimedOut(callback)) {
-            ci.cancel();
-            return;
-        }
-        if (ProtocolHttpBridge.wasCancelled(callback)) {
-            // 取消是终态：消费掉标记，避免回调对象长期留在取消集合里。
-            ProtocolHttpBridge.clearCancelled(callback);
+        // 取消/超时/正常完成是持久终态：丢弃迟到结果，不再消费标记。
+        if (ProtocolHttpBridge.isTerminal(callback)) {
             ci.cancel();
             return;
         }
         if (ProtocolHttpBridge.isInactive(callback)
                 || ((Client) (Object) this).shouldStopChat(callback.getMaid())) {
-            ProtocolHttpBridge.clearCancelled(callback);
             ci.cancel();
             return;
         }
-        ProtocolHttpBridge.clearCancelled(callback);
         boolean successful = throwable == null && response != null
                 && response.statusCode() >= 200 && response.statusCode() < 300;
         if (successful && !ProtocolBridge.isNormalized(response)) {
@@ -144,13 +198,15 @@ public abstract class LLMOpenAIClientMixin {
                 }
             } catch (ProtocolException e) {
                 tlmAgentTweaks$recordUsage(callback, response, throwable);
-                callback.onFailure(request, new Throwable("Protocol response decode failed: " + e.getMessage(), e),
+                ProtocolHttpBridge.dispatchFailure(callback, request,
+                        new Throwable("Protocol response decode failed: " + e.getMessage(), e),
                         ErrorCode.JSON_DECODE_ERROR);
                 ci.cancel();
                 return;
             } catch (Throwable t) {
                 tlmAgentTweaks$recordUsage(callback, response, throwable);
-                callback.onFailure(request, new Throwable("Protocol response decode failed", t),
+                ProtocolHttpBridge.dispatchFailure(callback, request,
+                        new Throwable("Protocol response decode failed", t),
                         ErrorCode.JSON_DECODE_ERROR);
                 ci.cancel();
                 return;

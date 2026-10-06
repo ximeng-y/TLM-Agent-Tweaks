@@ -45,6 +45,38 @@
 
 预算耗尽时本轮请求被作废，并以一条超时失败走到 TLM 的失败回调（玩家能看到原因，而不是气泡一直转）。同一女仆在此期间新发起的对话有各自的预算，不受影响。
 
+## 统一终态与按会话取消
+
+一次逻辑对话有 4 种终态：**正常完成、失败完成、静默取消、预算到期**。本 mod 在协议桥把四种终态统一到**单一弱引用状态位**（`finished` / `completed` / `timed_out` / `cancelled`）上收口；其中 `finished` 表示响应已认领、仍可派发，`completed` 表示业务主动结束、禁止派发。终态不会恢复为运行状态，只随回调被回收而消失：
+
+- **正常完成 / 失败完成**：由公共响应调用点（最终文本出口、传输/HTTP/解析失败、Token 超限、无 choice）统一识别，不要求回调调用父类。即使子类覆盖了 `onSuccess` / `onFailure` 且不调用父类，预算与 deadline 也会被可靠释放。
+- **静默取消**：业务方调用公开取消接口后，本回调的发送、排队、重试、deadline 与迟到结果全部被丢弃，不产生任何失败提示。
+- **预算到期**：只派发一次原有超时失败，随后迟到结果一律丢弃。
+
+**竞争认领是原子的**：完成与超时都在同一状态位上用 `putIfAbsent` 抢占，只有一个获胜者拥有唯一派发权，不存在「响应被超时吞掉、超时被完成吞掉」的双杀交错。显式 `cancel` / `complete` 是业务主动动作，覆盖竞争状态，从而抑制尚未派发的通知。取消具有最高优先级：`cancel` 后再调用 `complete` 仍保留 `cancelled`，`isCancelled` 始终返回 `true`；排队的普通响应仅在状态仍为 `finished` 时派发。
+
+**取消独立可查**：显式/生命周期取消与超时是两个独立状态。已超时后又显式取消仍视为取消（`isCancelled` 返回 `true`），取消优先抑制后续通知；单纯超时不视为取消。
+
+**工具响应本身不是终态**：HTTP 返回工具调用后预算继续保留，后续工具续接沿用原截止时间，不会重新计时。
+
+### 业务自决结束（complete / cancel）
+
+如果业务在工具回调、内部规划或其它自行控制的路径上**不再走成功/失败回调**（例如被主人插话后作废互聊），由业务方显式告知本 mod：
+
+| 方法 | 用途 |
+| --- | --- |
+| `complete(LLMCallback)` | 业务明确结束且不会再续接：关闭该回调整轮登记（省预算、关 deadline）。幂等，不调用业务回调。 |
+| `cancel(LLMCallback)` | 静默作废：取消 HTTP/排队/重试/deadline、释放预算，禁止后续重发与结果派发。幂等，不调用业务回调。 |
+| `isCancelled(LLMCallback)` | 查询显式/生命周期取消状态；正常完成、真实超时不视为显式取消。 |
+
+调用位置：`com.xm2nd.tlmagenttweaks.api.LlmConversationLifecycle`。按**具体回调实例**生效：作废只影响传进来的那一个回调，不影响同一女仆的其它对话。
+
+契约边界：
+
+- `cancel` 不代替业务清理工具历史、pending、等待气泡和互聊链，也不会主动调用业务 `onFailure`；这些状态收尾仍归业务方。
+- 取消不保证远端模型停止生成或停止计费。
+- 本 mod 不根据回调类名猜测终态：任何业务自决结束的路径都应由业务方调用 `complete` 或 `cancel`。
+
 ## 玩家可见行为
 
 重试期间只更新等待气泡，**不**输出聊天栏错误、**不**提前调用失败回调：
@@ -72,6 +104,12 @@
 
 - **只改本 mod**：不修改 Self-Talk 与 MIMO-TTS 的任何代码、配置或产物。
 - **Self-Talk**：Self-Talk 在 `LLMCallback.onSuccess` / `onFailure` 的 HEAD 注入以标记「玩家聊天结束」。本 mod 的预算清理落在同一个 `LLMCallback` 类上，但采用不同方法名的私有方法注入，两者互不干扰；重试期间不调用 `onFailure`，因此不会让 Self-Talk 提前解除「玩家聊天进行中」标记。工具续接的实际行为与未装本 mod 时一致：`addToolResult` 返回调用者自身，续接复用同一个回调对象。
+- **Self-Talk 尚未接入取消接口**：已完成请求（正常结束或已被丢弃但已收到最终响应）不再误报 240 秒超时；但**业务已作废、仍未完成**的旧请求仍可能真正达到 240 秒并报错。取消接口的配套接入（识别作废会话、保存回调引用、调用 `LlmConversationLifecycle.cancel` 及清理自身业务状态）由后续 Self-Talk Issue 承担，本次不实施。配套接入遵循以下契约：
+  1. 对已经作废的请求，将**实际回调实例**传给 `LlmConversationLifecycle.cancel`；
+  2. 对自行结束且不再续接、也不走成功/失败回调的路径，调用 `complete`；
+  3. 业务许可判断和自身状态收尾仍归 Self-Talk；不能仅因链中断就取消仍获准交付的另一只女仆的正式回复；
+  4. `InterChatCallback.onFailure` 先调用父类再判断交付许可的问题，需要 Self-Talk 配套处理；仅完成本 mod 不能替代这一责任；
+  5. 未安装本 mod 时 Self-Talk 应保持独立运行，本 mod 不引入对 Self-Talk 的依赖。
 - **MIMO-TTS**：TTS 走 `LLMCallback.onSuccess` 之后的独立链路，重试发生在 TTS 之前，两者不重叠。
 - **重试与工具有序性**：重试不重新执行工具。工具执行错误不进入重试范围（与规则表一致）。
 
@@ -84,9 +122,11 @@
 | `common/` | `stream/RequestRetryPolicy.java` | 每次请求的规则快照（配置中途改动不影响本轮） |
 | `common/` | `stream/ConversationBudget.java` | 整轮预算接口 |
 | `common/` | `stream/StreamingHttpTransport.java` | 重试与回退共用的请求状态机 |
-| `neoforge/` | `protocol/stream/ProtocolHttpBridge.java` | 配置快照、站点上下文、预算登记、取消与超时收口 |
 | `neoforge/` | `protocol/stream/ProtocolRetryBudget.java` | 整轮预算登记表（240 秒） |
+| `neoforge/` | `api/LlmConversationLifecycle.java` | 公开生命周期接口（complete / cancel / isCancelled，薄门面） |
+| `neoforge/` | `protocol/stream/ProtocolHttpBridge.java` | 配置快照、站点上下文、预算登记、统一终态收口与取消 |
 | `neoforge/` | `protocol/stream/RetrySettings.java` | 固定规则常量与开关读取 |
 | `neoforge/` | `protocol/stream/RetryNotifier.java` | 切换到服务端主线程刷新等待气泡 + 预算到期通知 |
 | `neoforge/` | `protocol/stream/RetryBubble.java` | 气泡副文本 |
-| `neoforge/` | `mixin/LLMCallbackMixin.java` | 业务终态清理预算与取消标记 |
+| `neoforge/` | `mixin/LLMCallbackMixin.java` | 父类直接成功/失败路径的兜底收尾与迟到结果拦截 |
+| `neoforge/` | `mixin/LLMOpenAIClientMixin.java` | 最终文本成功派发 + Token 超限/无 choice 失败派发 + `handle` 内联复刻接口默认方法的三处失败派发 |
