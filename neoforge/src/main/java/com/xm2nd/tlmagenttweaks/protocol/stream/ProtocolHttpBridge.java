@@ -55,12 +55,14 @@ public final class ProtocolHttpBridge {
     private static final Map<LLMCallback, Entry> PENDING = new ConcurrentHashMap<>();
     /**
      * 终态状态机：弱引用，键为回调实例。值仅允许 {@link #STATE_FINISHED}、
-     * {@link #STATE_TIMED_OUT}、{@link #STATE_CANCELLED} 三种；空值表示仍在运行。
+     * {@link #STATE_COMPLETED}、{@link #STATE_TIMED_OUT}、{@link #STATE_CANCELLED}；
+     * 空值表示仍在运行。finished 保留结果派发资格，completed 表示业务主动结束、禁止派发。
      * 竞争认领（完成/超时）用 {@code putIfAbsent} 抢占，只产生一个获胜者；
      * 业务 cancel / complete 用强制写入覆盖竞争状态。
      */
     private static final Map<LLMCallback, String> TERMINAL = new WeakHashMap<>();
     private static final String STATE_FINISHED = "finished";
+    private static final String STATE_COMPLETED = "completed";
     private static final String STATE_TIMED_OUT = "timed_out";
     private static final String STATE_CANCELLED = "cancelled";
     /**
@@ -163,13 +165,15 @@ public final class ProtocolHttpBridge {
         }
     }
 
-    /** 业务主动覆盖：无条件写入终态（取消/完成优先于竞争终态，抑制尚未派发的通知）。 */
+    /** 业务主动覆盖：取消优先且不可撤销；主动结束覆盖竞争终态，抑制尚未派发的通知。 */
     private static void forceTerminal(LLMCallback callback, String state) {
         if (callback == null) {
             return;
         }
         synchronized (TERMINAL) {
-            TERMINAL.put(callback, state);
+            if (!STATE_CANCELLED.equals(TERMINAL.get(callback))) {
+                TERMINAL.put(callback, state);
+            }
         }
     }
 
@@ -186,7 +190,7 @@ public final class ProtocolHttpBridge {
         if (callback == null) {
             return;
         }
-        forceTerminal(callback, STATE_FINISHED);
+        forceTerminal(callback, STATE_COMPLETED);
         releaseResources(callback);
     }
 
@@ -310,7 +314,7 @@ public final class ProtocolHttpBridge {
         }
         try {
             callback.runOnServerThread(() -> {
-                if (isInactive(callback) || isCancelled(callback)) {
+                if (isInactive(callback) || !STATE_FINISHED.equals(stateOf(callback))) {
                     return;
                 }
                 try {
@@ -339,7 +343,7 @@ public final class ProtocolHttpBridge {
         }
         try {
             callback.runOnServerThread(() -> {
-                if (isInactive(callback) || isCancelled(callback)) {
+                if (isInactive(callback) || !STATE_FINISHED.equals(stateOf(callback))) {
                     return;
                 }
                 try {
@@ -411,7 +415,8 @@ public final class ProtocolHttpBridge {
 
     /** 完成标记：统一成功/失败派发或业务 complete 已关闭该回调整轮登记。 */
     public static boolean wasFinished(LLMCallback callback) {
-        return STATE_FINISHED.equals(stateOf(callback));
+        String state = stateOf(callback);
+        return STATE_FINISHED.equals(state) || STATE_COMPLETED.equals(state);
     }
 
     /** 终态判断：取消、超时、正常完成任一成立即视为已终态，不再进入发送与结果派发。 */
