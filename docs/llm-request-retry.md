@@ -90,7 +90,7 @@
 
 ## 关闭方式
 
-`config/tlmagenttweaks-common.toml`：
+`config/tlm_agent_tweaks-common.toml`：
 
 ```toml
 [retry]

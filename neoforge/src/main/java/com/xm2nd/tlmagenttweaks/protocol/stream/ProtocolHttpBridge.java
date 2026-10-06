@@ -9,6 +9,7 @@ import com.xm2nd.tlmagenttweaks.common.stream.RequestRetryPolicy;
 import com.xm2nd.tlmagenttweaks.common.stream.SiteThrottleScheduler;
 import com.xm2nd.tlmagenttweaks.common.stream.StreamingHttpTransport;
 import com.xm2nd.tlmagenttweaks.protocol.ProtocolBridge;
+import com.xm2nd.tlmagenttweaks.thinking.ThinkingDisplayService;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.neoforge.server.ServerLifecycleHooks;
 
@@ -90,11 +91,13 @@ public final class ProtocolHttpBridge {
         }
         SiteProtocol protocol = ProtocolBridge.protocolOf(site);
         RequestRetryPolicy policy = RetrySettings.policy();
-        ProtocolStreamListener listener = new ProtocolStreamListener(site, callback);
+        // 展示句柄随本次请求新建：新一轮请求清空旧思考并回到思考阶段。
+        ThinkingDisplayService.Handle displayHandle = ThinkingDisplayService.beginRequest(callback);
+        ProtocolStreamListener listener = new ProtocolStreamListener(site, callback, displayHandle);
         StreamingHttpTransport.FrozenRequest frozen = StreamingHttpTransport.freeze(request);
         String siteId = site == null ? null : site.id();
         // 提示器随本次请求的配置快照构造，配置在请求进行中被改动不影响本轮。
-        RetryNotifier notifier = new RetryNotifier(callback, policy);
+        RetryNotifier notifier = new RetryNotifier(callback, policy, displayHandle);
         StreamingHttpTransport.Call call = TRANSPORT.prepare(client, frozen, protocol, listener,
                 siteId, ProtocolRetryBudget.budgetFor(callback), policy, notifier);
         register(callback, call::cancel, notifier, request);
@@ -463,6 +466,8 @@ public final class ProtocolHttpBridge {
             entry.notifier.cancelDeadline();
             entry.notifier.finish();
         }
+        // 幂等终态清理：覆盖成功、失败、超时、主动 complete/cancel 与生命周期取消。
+        ThinkingDisplayService.endRequest(callback);
     }
 
     /**
@@ -480,6 +485,8 @@ public final class ProtocolHttpBridge {
             entry.notifier.cancelDeadline();
             entry.notifier.finish();
         }
+        // 清理展示状态，但不改变上面「保留预算」的语义。
+        ThinkingDisplayService.endRequest(callback);
     }
 
     /** 丢弃站点级排队与冷却状态（跨存档复用站点对象时使用）。 */

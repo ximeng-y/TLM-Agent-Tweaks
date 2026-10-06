@@ -2,8 +2,10 @@ package com.xm2nd.tlmagenttweaks.client;
 
 import com.github.tartaricacid.touhoulittlemaid.client.gui.entity.maid.ai.HistoryAIChatScreen;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
+import com.xm2nd.tlmagenttweaks.client.thinking.ThinkingDisplayCache;
 import com.xm2nd.tlmagenttweaks.network.CompressHistoryResultPayload;
 import com.xm2nd.tlmagenttweaks.network.PriceTablePayload;
+import com.xm2nd.tlmagenttweaks.network.ThinkingDisplayPayload;
 import com.xm2nd.tlmagenttweaks.network.TokenStatsDataPayload;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
@@ -48,5 +50,9 @@ public final class ClientPacketHandlers {
 
     public static void onPriceTable(PriceTablePayload payload) {
         ClientPriceCache.accept(payload);
+    }
+
+    public static void onThinkingDisplay(ThinkingDisplayPayload payload) {
+        ThinkingDisplayCache.accept(payload);
     }
 }

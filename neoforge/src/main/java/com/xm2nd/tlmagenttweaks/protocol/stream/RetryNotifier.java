@@ -5,6 +5,7 @@ import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
 import com.xm2nd.tlmagenttweaks.common.stream.RequestRetryPolicy;
 import com.xm2nd.tlmagenttweaks.common.stream.StreamingHttpTransport;
+import com.xm2nd.tlmagenttweaks.thinking.ThinkingDisplayService;
 import net.minecraft.network.chat.Component;
 
 import java.util.concurrent.Executors;
@@ -45,13 +46,16 @@ final class RetryNotifier implements StreamingHttpTransport.AttemptListener {
 
     private final LLMCallback callback;
     private final RequestRetryPolicy policy;
+    private final ThinkingDisplayService.Handle displayHandle;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean deadlineClosed = new AtomicBoolean();
     private volatile ScheduledFuture<?> deadline;
 
-    RetryNotifier(LLMCallback callback, RequestRetryPolicy policy) {
+    RetryNotifier(LLMCallback callback, RequestRetryPolicy policy,
+                  ThinkingDisplayService.Handle displayHandle) {
         this.callback = callback;
         this.policy = policy;
+        this.displayHandle = displayHandle;
     }
 
     @Override
@@ -70,12 +74,16 @@ final class RetryNotifier implements StreamingHttpTransport.AttemptListener {
         } else {
             text = RetryBubble.retry(retryOrdinal, policy.maxRetries(), rateLimited);
         }
+        // 排队与重试提示要占用气泡副文本：先切回原生提示，思考链让位给 TLM 自己的文字。
+        ThinkingDisplayService.onNativeStage(callback, displayHandle, fallback);
         show(text);
     }
 
     @Override
     public void onSendStart(boolean firstAttempt) {
-        // 发出后不再改写气泡：随后的结果或下一次等待会立即覆盖它。
+        // 普通流式重试真正发出时重新从空窗口开始播放思考；
+        // 已回退非流式的请求会被展示服务忽略，不会重播中断流残片。
+        ThinkingDisplayService.onSendStart(callback, displayHandle, firstAttempt);
     }
 
     /**

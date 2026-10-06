@@ -24,6 +24,8 @@
 
 5. **请求失败自动重试**：模型站点返回 429 或 500/502/503/504 时，同一轮对话内自动重发，每次请求最多额外重试 **2 次**、每次固定等待 **5 秒**（忽略 `Retry-After`，不做指数退避）。429 一律重试，不区分短期限流与配额耗尽。重试期间只更新等待气泡，不输出聊天栏错误、不提前调用失败回调。站点被限流后进入 5 秒冷却，冷却期间尚未发出的请求排队延后，避免把一个正在限流的站点推向更深的限流。整轮对话（含全部工具续接）共享 240 秒固定预算。规则写死，仅提供 `retry.enabled` 总开关。详见 [docs/llm-request-retry.md](docs/llm-request-retry.md)。
 
+6. **思考链气泡滚动**：把模型的思考（reasoning）增量滚动显示在 TLM 原生「少女思考中」等待气泡内——单行、定宽、超宽时左侧填充右侧滚出；换行即清空重填。进入工具执行阶段时切回 TLM 原生的工具提示文本，请求结束/失败/取消时清空。流式断流改用普通模式重发时**不补播**中断前的片段。每个玩家可在设置页顶部按钮单独开关（默认开启，仅影响本机显示，不改变请求）。详见 [docs/thinking-bubble.md](docs/thinking-bubble.md)。
+
 ## 构建
 
 本仓库不携带 gradle wrapper（沿用本地惯例），使用本机缓存的 Gradle 8.14.2（如 Chunk-Plan 的 `.XMTEMP/gradle-8.14.2/bin/gradle`）：
@@ -49,7 +51,7 @@ neoforge/   NeoForge 21.1 薄壳：入口/配置/mixin/网络/GUI/Cloth 集成
 
 ## 配置
 
-`config/tlmagenttweaks-common.toml`（也可在游戏内 TLM 设置页 → AI 功能 → AI 功能增强 中修改）：
+`config/tlm_agent_tweaks-common.toml`（也可在游戏内 TLM 设置页 → AI 功能 → AI 功能增强 中修改）：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
@@ -58,6 +60,12 @@ neoforge/   NeoForge 21.1 薄壳：入口/配置/mixin/网络/GUI/Cloth 集成
 | `stats.adminPermissionLevel` | `2` | 查看统计/设置价格所需 OP 等级 |
 | `stats.recordSummaryCalls` | `true` | 压缩摘要请求是否计入统计 |
 | `retry.enabled` | `true` | 请求失败自动重试总开关（关闭后无重试与站点冷却；流式断流改用非流式重发不受影响） |
+
+客户端本地配置 `config/tlm_agent_tweaks-client.toml`（仅客户端，不同步到服务器）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `thinking.showReasoning` | `true` | 是否在本机等待气泡中滚动显示模型思考链（游戏内 Agent Tweaks 设置页顶部按钮可切换） |
 
 ## 数据文件
 

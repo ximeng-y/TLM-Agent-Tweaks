@@ -1,7 +1,9 @@
 package com.xm2nd.tlmagenttweaks.client.gui;
 
+import com.xm2nd.tlmagenttweaks.client.ClientConfig;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.neoforged.api.distmarker.Dist;
@@ -28,6 +30,14 @@ public class StatsEntryScreen extends Screen {
 
         int cx = this.width / 2;
         int cy = this.height / 2;
+        // 三行自上而下：思考链开关、Token 统计、返回
+        this.addRenderableWidget(Button.builder(thinkingLabel(), b -> {
+                    ClientConfig.setShowReasoning(!ClientConfig.showReasoning());
+                    b.setMessage(thinkingLabel());
+                })
+                .tooltip(Tooltip.create(
+                        Component.translatable("gui.tlm_agent_tweaks.button.thinking.tooltip")))
+                .bounds(cx - 100, cy - 36, 200, 20).build());
         this.addRenderableWidget(Button.builder(
                         Component.translatable("gui.tlm_agent_tweaks.button.token_stats"),
                         b -> this.minecraft.setScreen(new TokenStatsScreen(this)))
@@ -35,6 +45,13 @@ public class StatsEntryScreen extends Screen {
         this.addRenderableWidget(Button.builder(Component.translatable("gui.tlm_agent_tweaks.stats.back"),
                         b -> this.onClose())
                 .bounds(cx - 100, cy + 16, 200, 20).build());
+    }
+
+    /** 每次 init 都读取当前配置，页面重开或 resize 不会恢复默认值。 */
+    private static Component thinkingLabel() {
+        return Component.translatable(ClientConfig.showReasoning()
+                ? "gui.tlm_agent_tweaks.button.thinking_on"
+                : "gui.tlm_agent_tweaks.button.thinking_off");
     }
 
     @Override
