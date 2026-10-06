@@ -4,6 +4,8 @@ import com.github.tartaricacid.touhoulittlemaid.entity.chatbubble.IChatBubbleDat
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.xm2nd.tlmagenttweaks.network.ThinkingDisplayPayload;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.api.distmarker.OnlyIn;
@@ -20,8 +22,11 @@ import java.util.UUID;
  * 玩家中途进入可见范围都不会产生文本错接。
  * <p>
  * 按「维度 + 女仆 + 展示会话」区分状态；新修订覆盖旧修订，旧会话的快照不再被考虑。
+ * 若同一气泡上短暂存在多个会话，按展示会话 ID 最大者胜出（见 {@link #currentFor}）。
+ * <p>
  * 快照可能先于原生的实体/气泡同步到达，此时把它暂存最多
- * {@link #PENDING_TIMEOUT_TICKS} 个客户端 tick，仍未匹配到气泡则丢弃（后续快照可重建）。
+ * {@link #PENDING_TIMEOUT_TICKS} 个客户端 tick，仍未绑定到有效气泡则丢弃（后续快照可重建）；
+ * 玩家离开跟踪范围后收不到服务端 CLEAR 的条目同样按此超时淘汰。
  * <p>
  * 开关只影响本地绘制：关闭时这里照常接收快照，但渲染路径不会查询它；
  * 重新开启后显示的是最新快照，不会补播关闭期间的内容。
@@ -99,6 +104,10 @@ public final class ThinkingDisplayCache {
      * <p>
      * 调用方直接给出正在渲染的女仆，因此这里的匹配是精确的：气泡 ID 变化后，
      * 旧气泡的对象与新 ID 不再对应，旧气泡不会被当成展示目标。
+     * <p>
+     * 若同一气泡短暂存在多个会话（服务端换轮次时的有序 CLEAR 与新快照之间、丢包重连等），
+     * 按**展示会话 ID 最大者**胜出，即服务端最后指定的那个会话；不依赖 {@link HashMap}
+     * 的遍历顺序，避免同一帧内随机命中旧会话的 NATIVE 而看不到新一轮思考。
      *
      * @param data 该气泡本次传入的原始 {@link IChatBubbleData} 对象
      * @return 命中时返回条目，否则返回 null（调用方应原样使用原 renderer）
@@ -107,23 +116,35 @@ public final class ThinkingDisplayCache {
         Level level = maid.level();
         String dimension = level.dimension().location().toString();
         UUID maidId = maid.getUUID();
+        Entry best = null;
         for (Map.Entry<Key, Entry> candidate : ENTRIES.entrySet()) {
             Key key = candidate.getKey();
             Entry entry = candidate.getValue();
             if (!key.dimension().equals(dimension) || !key.maidId().equals(maidId)) {
                 continue;
             }
+            if (best != null && entry.displaySessionId <= best.displaySessionId) {
+                continue;
+            }
             if (bubbleData(maid, entry.bubbleId) == data) {
-                return entry;
+                best = entry;
             }
         }
-        return null;
+        return best;
     }
 
-    /** 客户端每 tick 推进一次：为等待匹配的快照计时，超时丢弃；离开世界时整体清空。 */
+    /**
+     * 客户端每 tick 推进一次。
+     * <p>
+     * 逐个核对条目对应的女仆与等待气泡是否仍然存在：只有仍然绑定在有效活动气泡上的状态
+     * 才续期，其余（气泡已被移除、女仆已不在客户端世界中）计时淘汰。若只按维度无条件续期，
+     * 玩家先离开跟踪范围、请求随后结束时收不到服务端 CLEAR 的条目会一直留着累积。
+     * <p>
+     * 超时窗口只衡量「绑定是否仍然成立」，不构成请求总时长上限：正常的长请求始终绑定在
+     * 同一个气泡上，因此不会被误删。
+     */
     public static void tick() {
-        Level level = Minecraft.getInstance().level;
-        if (level == null) {
+        if (!(Minecraft.getInstance().level instanceof ClientLevel level)) {
             clear();
             return;
         }
@@ -133,9 +154,9 @@ public final class ThinkingDisplayCache {
         String dimension = level.dimension().location().toString();
         for (Iterator<Map.Entry<Key, Entry>> iterator = ENTRIES.entrySet().iterator(); iterator.hasNext(); ) {
             Map.Entry<Key, Entry> candidate = iterator.next();
+            Key key = candidate.getKey();
             Entry entry = candidate.getValue();
-            if (candidate.getKey().dimension().equals(dimension)) {
-                // 仍在当前维度：气泡本身是否还在由渲染路径逐帧判断，这里只统计快照年龄。
+            if (isStillBound(level, dimension, key, entry)) {
                 entry.ageTicks = 0;
                 continue;
             }
@@ -144,6 +165,22 @@ public final class ThinkingDisplayCache {
                 iterator.remove();
             }
         }
+    }
+
+    /** 该条目是否仍绑定在「客户端世界中确实存在的女仆 + 仍然存在的那个气泡」上。 */
+    private static boolean isStillBound(ClientLevel level, String dimension, Key key, Entry entry) {
+        if (!key.dimension().equals(dimension) || entry.bubbleId < 0L) {
+            // 不在当前维度（或从未绑定到气泡）：客户端看不见对应女仆，按超时淘汰，
+            // 否则玩家换维度后这些条目会永久滞留。
+            return false;
+        }
+        for (Entity entity : level.entitiesForRendering()) {
+            if (!(entity instanceof EntityMaid maid) || !maid.getUUID().equals(key.maidId())) {
+                continue;
+            }
+            return bubbleData(maid, entry.bubbleId) != null;
+        }
+        return false;
     }
 
     /** 退出世界、断开连接时清空全部展示状态。 */

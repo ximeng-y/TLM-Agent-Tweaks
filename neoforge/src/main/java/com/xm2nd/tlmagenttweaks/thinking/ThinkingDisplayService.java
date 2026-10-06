@@ -53,9 +53,22 @@ public final class ThinkingDisplayService {
             Collections.synchronizedMap(new WeakHashMap<>());
     /** 女仆 UUID → 正在跟踪该女仆的玩家 UUID 集合。 */
     private static final Map<UUID, Set<UUID>> OBSERVERS = new ConcurrentHashMap<>();
+    /**
+     * 气泡归属：一个等待气泡同时只由一个展示会话负责。
+     * <p>
+     * 工具续接会用同一个回调发起下一轮请求、复用同一个气泡，知识型工具
+     * （{@code GroundedAnswerCallback}）更是直接拿父回调的气泡发起子请求。若允许多个会话
+     * 争抢同一气泡，客户端就得靠遍历顺序在「旧的工具阶段」与「新的思考阶段」之间二选一，
+     * 结果不确定。这里在服务端一次定权：先发布者获得归属，其余会话对该气泡让位。
+     */
+    private static final Map<BubbleKey, Handle> OWNERS = new ConcurrentHashMap<>();
     private static final AtomicLong SESSION_IDS = new AtomicLong();
 
     private ThinkingDisplayService() {
+    }
+
+    /** 气泡的唯一标识：同一气泡在不同维度/女仆下互不相干。 */
+    private record BubbleKey(String dimension, UUID maidId, long bubbleId) {
     }
 
     /** 一次**请求**的展示句柄：每次发送新建，旧句柄的迟到事件一律作废。 */
@@ -77,6 +90,10 @@ public final class ThinkingDisplayService {
         private boolean dirty;
         private UUID maidId;
         private String dimension;
+        /** 本会话当前负责的气泡键；用于换气泡时撤销旧归属。 */
+        private volatile BubbleKey bubbleKey;
+        /** 是否已经向客户端发布过该会话的快照：决定终态是否需要发 CLEAR。 */
+        private boolean published;
 
         private Handle(long displaySessionId) {
             this.displaySessionId = displaySessionId;
@@ -96,6 +113,10 @@ public final class ThinkingDisplayService {
     /**
      * 新一轮请求：建立新句柄并清空旧思考回到 {@code THINKING}。
      * 返回 null 表示本次调用不参与展示（无回调）。
+     * <p>
+     * 同一回调发起新一轮请求（工具批次续接会复用同一个回调）时，上一轮句柄在这里
+     * **主动退休**：旧句柄失效、撤销它对气泡的归属，并通知客户端撤下它的显示。
+     * 否则旧句柄会一直占着同一个气泡，新一轮的思考链永远无法显示。
      */
     public static Handle beginRequest(LLMCallback callback) {
         try {
@@ -103,7 +124,13 @@ public final class ThinkingDisplayService {
                 return null;
             }
             Handle handle = new Handle(SESSION_IDS.incrementAndGet());
-            CURRENT.put(callback, handle);
+            Handle previous = CURRENT.put(callback, handle);
+            if (previous != null) {
+                previous.ended = true;
+                // 退休通知与下面的新阶段任务都排在同一条主线程队列上，顺序即语义：
+                // 客户端先收到旧会话的 CLEAR，再收到新会话的 THINKING。
+                submitForced(callback, () -> sendClear(previous));
+            }
             submit(callback, handle, () -> {
                 if (!isCurrent(callback, handle) || !hasWaitingBubble(callback)) {
                     // 无等待气泡的摘要/规划/子流程：不展示，也不影响原请求。
@@ -124,6 +151,10 @@ public final class ThinkingDisplayService {
     /**
      * 整轮终态清理：删除该回调的展示状态并让客户端丢弃对应气泡的替代绘制。
      * 幂等；成功、失败、超时、主动 complete/cancel 与生命周期取消都走这里。
+     * <p>
+     * 清理任务必须绕过 {@link #submit} 的 {@code ended} 守卫——本方法刚把
+     * {@code ended} 置位，若走同一条守卫则 CLEAR 永远不会执行，客户端只能等到
+     * 别的条件才撤下旧思考（启用 TTS 时 TLM 会长时间保留同一个等待气泡）。
      */
     public static void endRequest(LLMCallback callback) {
         try {
@@ -135,7 +166,7 @@ public final class ThinkingDisplayService {
                 return;
             }
             handle.ended = true;
-            submit(callback, handle, () -> sendClear(callback, handle));
+            submitForced(callback, () -> sendClear(handle));
         } catch (Throwable throwable) {
             debug("思考展示终态清理失败（已忽略）", throwable);
         }
@@ -145,6 +176,7 @@ public final class ThinkingDisplayService {
     public static void clearAll() {
         CURRENT.clear();
         OBSERVERS.clear();
+        OWNERS.clear();
     }
 
     // ---------- 阶段切换 ----------
@@ -300,37 +332,107 @@ public final class ThinkingDisplayService {
         if (handle.ended || !handle.dirty || !isCurrent(callback, handle)) {
             return;
         }
-        if (ProtocolHttpBridge.isInactive(callback)) {
+        if (!resolveBinding(callback, handle)) {
             return;
+        }
+        handle.dirty = false;
+        sendSnapshot(handle);
+    }
+
+    /**
+     * 解析并锁定本次发布的目标：女仆、维度与等待气泡 ID，同时定下气泡归属。
+     * <p>
+     * 每次发布前都重新解析，因为工具提示与重试都会把等待气泡换成新的 ID。
+     * 若该气泡已由别的展示会话负责（工具子请求复用父气泡、旧会话尚未退休），
+     * 本会话让位：不发布，也就不会出现两个会话争抢同一气泡的显示。
+     *
+     * @return 是否可以发布
+     */
+    private static boolean resolveBinding(LLMCallback callback, Handle handle) {
+        if (ProtocolHttpBridge.isInactive(callback)) {
+            return false;
         }
         EntityMaid maid = callback.getMaid();
         if (maid == null || !(maid.level() instanceof net.minecraft.server.level.ServerLevel)) {
-            return;
+            return false;
         }
-        // 每次刷新前重新解析气泡绑定：工具提示与重试都会换成新的等待气泡 ID。
         long bubbleId = callback.getWaitingChatBubbleId();
         if (!isWaitingBubble(maid, bubbleId)) {
-            return;
+            return false;
         }
-        handle.maidId = maid.getUUID();
-        handle.dimension = maid.level().dimension().location().toString();
+        UUID maidId = maid.getUUID();
+        String dimension = maid.level().dimension().location().toString();
+        BubbleKey key = new BubbleKey(dimension, maidId, bubbleId);
+        BubbleKey previousKey = handle.bubbleKey;
+        if (key.equals(previousKey)) {
+            // 已持有该气泡：确认归属仍在。停服/卸载会清空归属表，这里允许重新认领，
+            // 否则该会话会永久卡在「有绑定但无归属」而不再发布。
+            if (claimBubble(key, handle)) {
+                applyBinding(handle, maidId, dimension, bubbleId);
+                return true;
+            }
+            return false;
+        }
+        if (!claimBubble(key, handle)) {
+            // 该气泡已由其他**存活**的展示会话负责：让位，旧归属保持不变以免误撤。
+            return false;
+        }
+        if (previousKey != null) {
+            // 换气泡：撤销旧气泡的归属，避免旧键一直被本会话占着。
+            OWNERS.remove(previousKey, handle);
+        }
+        handle.bubbleKey = key;
+        applyBinding(handle, maidId, dimension, bubbleId);
+        return true;
+    }
+
+    /**
+     * 认领气泡归属：无主或原主人已退休（停服清理、旧会话结束）时成功。
+     * 只有仍然存活的另一个会话才构成真正的竞争，此时让位。
+     */
+    private static boolean claimBubble(BubbleKey key, Handle handle) {
+        Handle current = OWNERS.get(key);
+        if (current == handle) {
+            return true;
+        }
+        if (current != null && !current.ended) {
+            return false;
+        }
+        // 原主人已退休（或本来无主）：用 remove 语义替换，避免并发下覆盖存活的归属。
+        return current == null ? OWNERS.putIfAbsent(key, handle) == null
+                : OWNERS.replace(key, current, handle);
+    }
+
+    private static void applyBinding(Handle handle, UUID maidId, String dimension, long bubbleId) {
+        handle.maidId = maidId;
+        handle.dimension = dimension;
         handle.bubbleId = bubbleId;
-        handle.dirty = false;
-        sendSnapshot(handle);
+    }
+
+    /** 撤销该会话对气泡的归属（会话退休或换气泡时调用）。 */
+    private static void releaseOwnership(Handle handle) {
+        BubbleKey key = handle.bubbleKey;
+        if (key != null) {
+            OWNERS.remove(key, handle);
+            handle.bubbleKey = null;
+        }
     }
 
     private static void sendSnapshot(Handle handle) {
         boolean thinking = handle.phase == ThinkingDisplayPayload.PHASE_THINKING;
         String line = thinking ? handle.buffer.line() : "";
+        handle.published = true;
         sendToObservers(handle.maidId, new ThinkingDisplayPayload(handle.dimension, handle.maidId,
                 handle.displaySessionId, handle.revision, handle.bubbleId, handle.phase, line));
     }
 
-    private static void sendClear(LLMCallback callback, Handle handle) {
-        if (handle.maidId == null || handle.dimension == null) {
+    private static void sendClear(Handle handle) {
+        releaseOwnership(handle);
+        if (!handle.published || handle.maidId == null || handle.dimension == null) {
             // 从未发布过快照：客户端没有状态需要清理。
             return;
         }
+        handle.published = false;
         sendToObservers(handle.maidId, new ThinkingDisplayPayload(handle.dimension, handle.maidId,
                 handle.displaySessionId, handle.revision, handle.bubbleId,
                 ThinkingDisplayPayload.PHASE_CLEAR, ""));
@@ -346,8 +448,20 @@ public final class ThinkingDisplayService {
         }
         UUID maidId = maid.getUUID();
         observersOf(maidId).add(player.getUUID());
-        // 开始跟踪时补发当前快照，避免玩家中途进入可见范围时看到陈旧或不一致的窗口。
-        for (Handle handle : currentHandlesOf(maidId)) {
+        // 开始跟踪时补发现有的有效快照，避免玩家中途进入可见范围时看不到当前思考。
+        // 不能要求 dirty：常规发送已经把它清掉，这里要补的是「已发布且仍然有效」的状态。
+        List<Map.Entry<LLMCallback, Handle>> snapshot;
+        synchronized (CURRENT) {
+            if (CURRENT.isEmpty()) {
+                return;
+            }
+            snapshot = List.copyOf(CURRENT.entrySet());
+        }
+        for (Map.Entry<LLMCallback, Handle> entry : snapshot) {
+            Handle handle = entry.getValue();
+            if (handle.ended || handle.bubbleKey == null || !maidId.equals(handle.maidId)) {
+                continue;
+            }
             sendSnapshotTo(handle, player);
         }
     }
@@ -387,18 +501,6 @@ public final class ThinkingDisplayService {
         return OBSERVERS.computeIfAbsent(maidId, key -> ConcurrentHashMap.newKeySet());
     }
 
-    private static List<Handle> currentHandlesOf(UUID maidId) {
-        List<Handle> result = new java.util.ArrayList<>(2);
-        synchronized (CURRENT) {
-            for (Handle handle : CURRENT.values()) {
-                if (!handle.ended && maidId.equals(handle.maidId) && handle.dirty) {
-                    result.add(handle);
-                }
-            }
-        }
-        return result;
-    }
-
     // ---------- 发送 ----------
 
     /**
@@ -429,6 +531,7 @@ public final class ThinkingDisplayService {
 
     private static void sendSnapshotTo(Handle handle, ServerPlayer player) {
         boolean thinking = handle.phase == ThinkingDisplayPayload.PHASE_THINKING;
+        handle.published = true;
         sendTo(player, new ThinkingDisplayPayload(handle.dimension, handle.maidId,
                 handle.displaySessionId, handle.revision, handle.bubbleId, handle.phase,
                 thinking ? handle.buffer.line() : ""));
@@ -451,12 +554,27 @@ public final class ThinkingDisplayService {
         if (callback == null || handle == null) {
             return;
         }
+        submitForced(callback, () -> {
+            if (!handle.ended) {
+                task.run();
+            }
+        });
+    }
+
+    /**
+     * 不受 {@code ended} 守卫约束的主线程调度：仅供**终态清理**使用。
+     * <p>
+     * {@link #endRequest} 与 {@link #beginRequest} 都会先把旧句柄置为 ended，再靠这里
+     * 把 CLEAR 发出去；若走 {@link #submit} 则任务会被自己的守卫拦掉，客户端永远收不到清理。
+     */
+    private static void submitForced(LLMCallback callback, Runnable task) {
+        if (callback == null) {
+            return;
+        }
         try {
             callback.runOnServerThread(() -> {
                 try {
-                    if (!handle.ended) {
-                        task.run();
-                    }
+                    task.run();
                 } catch (Throwable throwable) {
                     debug("思考展示主线程任务失败（已忽略）", throwable);
                 }

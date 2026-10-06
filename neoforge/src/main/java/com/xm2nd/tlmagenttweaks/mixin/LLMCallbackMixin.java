@@ -10,8 +10,10 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.net.http.HttpRequest;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * TLM 工具执行等直接调用父类成功/失败的路径上的补充收尾入口。
@@ -80,6 +82,10 @@ public abstract class LLMCallbackMixin {
      * 注入点在 {@code ITool.onCallAsync} 调用之前，即工具提示刷新之后、真实执行之前；
      * 使用该方法当前实际使用的 {@code callback}（工具批次续接时可能已换成下一个回调），
      * 因此展示跟随的是本次工具执行真正归属的那个会话。
+     * <p>
+     * 目标方法返回 {@code CompletableFuture<LLMCallback>}，因此回调类型必须是
+     * {@link CallbackInfoReturnable}：Mixin 在应用注入时按描述符校验，返回类型不匹配会直接
+     * 抛 {@code InvalidInjectionException} 而使目标类加载失败。本注入不读也不改返回值。
      */
     @Inject(method = "onSingleCall", at = @At(value = "INVOKE",
             target = "Lcom/github/tartaricacid/touhoulittlemaid/ai/agent/tool/ITool;"
@@ -88,7 +94,7 @@ public abstract class LLMCallbackMixin {
                     + "Lcom/github/tartaricacid/touhoulittlemaid/ai/service/llm/LLMClient;)"
                     + "Ljava/util/concurrent/CompletableFuture;"))
     private void tlmAgentTweaks$onToolExecutionStart(ToolCall toolCall, LLMCallback callback, LLMClient client,
-                                                     CallbackInfo ci) {
+                                                     CallbackInfoReturnable<CompletableFuture<LLMCallback>> cir) {
         ThinkingDisplayService.onToolExecutionStart(callback);
     }
 }

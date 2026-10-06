@@ -90,8 +90,11 @@ public class ThinkingBubbleRenderer implements IChatBubbleRenderer {
             return;
         }
         int scaledWidth = Math.round(this.font.width(visible) * SECONDARY_TEXT_SCALE);
-        // 溢出时右对齐（最新内容贴右），未溢出时左对齐（自左向右填充）。
-        float x = Math.max(0, WINDOW_WIDTH - scaledWidth);
+        // 是否溢出要按**整行**判断：截取出的可见后缀本身当然装得下，用它判断永远不会溢出。
+        // 未溢出时从窗口左侧开始填充（新字逐个向右延伸）；溢出后只留可见后缀并右对齐，
+        // 使最新内容贴右。否则第一个字就会贴在右边，与约定相反。
+        boolean overflowed = this.font.width(this.line) > WINDOW_FONT_WIDTH;
+        float x = overflowed ? Math.max(0, WINDOW_WIDTH - scaledWidth) : 0;
 
         graphics.getPoseStack().pushPose();
         graphics.getPoseStack().translate(ICON_TEXT_OFFSET, this.font.lineHeight + 1, 0);
