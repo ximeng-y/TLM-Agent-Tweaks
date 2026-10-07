@@ -59,7 +59,11 @@ public final class ThinkingDisplayService {
      * 工具续接会用同一个回调发起下一轮请求、复用同一个气泡，知识型工具
      * （{@code GroundedAnswerCallback}）更是直接拿父回调的气泡发起子请求。若允许多个会话
      * 争抢同一气泡，客户端就得靠遍历顺序在「旧的工具阶段」与「新的思考阶段」之间二选一，
-     * 结果不确定。这里在服务端一次定权：先发布者获得归属，其余会话对该气泡让位。
+     * 结果不确定。这里在服务端一次定权：**建立更早的存活会话**持有该气泡，其余会话让位。
+     * <p>
+     * 定权规则与认领时机都必须与遍历顺序无关：以「谁先认领」定胜负，等价于让每 tick 遍历
+     * 登记表的顺序决定父子谁持有气泡。因此父请求在**工具执行之前**同步认领新气泡
+     * （见 {@link #onToolExecutionStart}），且 {@link #claimBubble} 也以会话建立先后为唯一判据。
      */
     private static final Map<BubbleKey, Handle> OWNERS = new ConcurrentHashMap<>();
     private static final AtomicLong SESSION_IDS = new AtomicLong();
@@ -285,6 +289,17 @@ public final class ThinkingDisplayService {
      * <p>
      * 工具执行期间不显示思考内容：副文本交还给 TLM 自己的工具提示。
      * 这里只切阶段，不改写气泡、不参与工具调用本身。
+     * <p>
+     * 本方法同时承担**父子归属定序**：TLM 在调用 {@code onCallAsync} 之前已经
+     * {@code refreshWaitingChatBubble} 换出新气泡 ID，而知识型工具（{@code GroundedAnswerCallback}、
+     * {@code QueryMinecraftWikiTool}）会在 {@code onCallAsync} 内部用该气泡创建子请求。
+     * 若把归属留到每 tick 的批量发送再定，父、子谁先被 {@link WeakHashMap} 遍历到就成了
+     * 随机结果：子请求先被遍历时会占住气泡，工具提示反而被它的思考替换。
+     * 因此这里在**创建任何子请求之前**、于服务端主线程同步完成归属绑定。
+     * <p>
+     * 调用点必在主线程：TLM 的 {@code refreshWaitingChatBubble} 强制要求主线程，而它就在本注入
+     * 之前执行；因此这里读写的展示状态与该线程上的 tick 发送处于同一线程，不引入新的竞态。
+     * 绑定的发布仍由 tick 负责，保持「先 CLEAR 后新状态」的包序语义不变。
      */
     public static void onToolExecutionStart(LLMCallback callback) {
         Handle handle = (callback == null) ? null : CURRENT.get(callback);
@@ -293,6 +308,10 @@ public final class ThinkingDisplayService {
         }
         handle.suppressReasoning();
         try {
+            if (isCurrent(callback, handle)) {
+                // 同步认领刚刷新的气泡；后续子请求在同一调用栈内创建时只能让位。
+                resolveBinding(callback, handle);
+            }
             submit(callback, handle, () -> {
                 if (!isCurrent(callback, handle)) {
                     return;
@@ -387,20 +406,39 @@ public final class ThinkingDisplayService {
     }
 
     /**
-     * 认领气泡归属：无主或原主人已退休（停服清理、旧会话结束）时成功。
-     * 只有仍然存活的另一个会话才构成真正的竞争，此时让位。
+     * 认领气泡归属：**建立更早的存活会话**才是气泡的主人。
+     * <p>
+     * 不以「谁先调用这里」定胜负：父子会话可能在同一 tick 内各自认领（父请求在工具开始前
+     * 同步认领，子请求由工具创建后同样在下一 tick 认领），谁的 tick 任务先执行并不是语义。
+     * {@link Handle#displaySessionId} 在建立时单调递增，父请求必然早于它派生出的子请求，
+     * 因此按 ID 取小者得到的就是「父请求持有、子请求让位」，与遍历顺序无关。
+     * <p>
+     * 该比较是全序：建立更早的存活主人不会被建立更晚的会话夺走，因此不会出现两个会话
+     * 反复互相接管；原主人退休（会话结束、停服清理）后，剩余会话中最早的那个才接手。
+     *
+     * @return 本会话是否持有该气泡的归属
      */
     private static boolean claimBubble(BubbleKey key, Handle handle) {
-        Handle current = OWNERS.get(key);
-        if (current == handle) {
-            return true;
+        while (true) {
+            Handle current = OWNERS.get(key);
+            if (current == handle) {
+                return true;
+            }
+            if (current == null) {
+                if (OWNERS.putIfAbsent(key, handle) == null) {
+                    return true;
+                }
+                continue;
+            }
+            if (!current.ended && current.displaySessionId < handle.displaySessionId) {
+                // 存活且建立更早：它是主人，本会话让位。
+                return false;
+            }
+            // 原主人已退休，或本会话建立得更早：用 CAS 接管，避免并发下覆盖别的存活归属。
+            if (OWNERS.replace(key, current, handle)) {
+                return true;
+            }
         }
-        if (current != null && !current.ended) {
-            return false;
-        }
-        // 原主人已退休（或本来无主）：用 remove 语义替换，避免并发下覆盖存活的归属。
-        return current == null ? OWNERS.putIfAbsent(key, handle) == null
-                : OWNERS.replace(key, current, handle);
     }
 
     private static void applyBinding(Handle handle, UUID maidId, String dimension, long bubbleId) {
