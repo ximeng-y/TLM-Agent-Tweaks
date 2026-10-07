@@ -59,13 +59,14 @@ public final class ThinkingDisplayService {
      * 工具续接会用同一个回调发起下一轮请求、复用同一个气泡，知识型工具
      * （{@code GroundedAnswerCallback}）更是直接拿父回调的气泡发起子请求。若允许多个会话
      * 争抢同一气泡，客户端就得靠遍历顺序在「旧的工具阶段」与「新的思考阶段」之间二选一，
-     * 结果不确定。这里在服务端一次定权：**建立更早的存活会话**持有该气泡，其余会话让位。
+     * 结果不确定。这里将气泡归属绑定到回调，而不是单次请求：同一回调换轮次时继承归属，
+     * 其余回调让位，直到持有者整轮结束或换到另一个气泡。
      * <p>
      * 定权规则与认领时机都必须与遍历顺序无关：以「谁先认领」定胜负，等价于让每 tick 遍历
      * 登记表的顺序决定父子谁持有气泡。因此父请求在**工具执行之前**同步认领新气泡
-     * （见 {@link #onToolExecutionStart}），且 {@link #claimBubble} 也以会话建立先后为唯一判据。
+     * （见 {@link #onToolExecutionStart}），工具续接只清空旧快照，不释放回调的归属。
      */
-    private static final Map<BubbleKey, Handle> OWNERS = new ConcurrentHashMap<>();
+    private static final Map<BubbleKey, Ownership> OWNERS = new ConcurrentHashMap<>();
     private static final AtomicLong SESSION_IDS = new AtomicLong();
 
     private ThinkingDisplayService() {
@@ -75,9 +76,18 @@ public final class ThinkingDisplayService {
     private record BubbleKey(String dimension, UUID maidId, long bubbleId) {
     }
 
+    /** 同一回调跨请求复用的归属令牌；不反向持有回调，保留 CURRENT 的弱引用语义。 */
+    private static final class Ownership {
+        /** 仅整轮终态置位，单次请求退休不会释放归属。 */
+        private volatile boolean ended;
+        /** 当前负责的气泡键，只在服务端主线程读写。 */
+        private BubbleKey bubbleKey;
+    }
+
     /** 一次**请求**的展示句柄：每次发送新建，旧句柄的迟到事件一律作废。 */
     public static final class Handle {
         private final long displaySessionId;
+        private final Ownership ownership;
         /**
          * 本请求是否已改用非流式。由 HTTP/调度线程写入、读取，因此必须是原子类型：
          * 它的可见性不能依赖主线程任务队列的执行时机。
@@ -94,13 +104,12 @@ public final class ThinkingDisplayService {
         private boolean dirty;
         private UUID maidId;
         private String dimension;
-        /** 本会话当前负责的气泡键；用于换气泡时撤销旧归属。 */
-        private volatile BubbleKey bubbleKey;
         /** 是否已经向客户端发布过该会话的快照：决定终态是否需要发 CLEAR。 */
         private boolean published;
 
-        private Handle(long displaySessionId) {
+        private Handle(long displaySessionId, Ownership ownership) {
             this.displaySessionId = displaySessionId;
+            this.ownership = ownership;
         }
 
         public boolean reasoningSuppressed() {
@@ -119,18 +128,26 @@ public final class ThinkingDisplayService {
      * 返回 null 表示本次调用不参与展示（无回调）。
      * <p>
      * 同一回调发起新一轮请求（工具批次续接会复用同一个回调）时，上一轮句柄在这里
-     * **主动退休**：旧句柄失效、撤销它对气泡的归属，并通知客户端撤下它的显示。
-     * 否则旧句柄会一直占着同一个气泡，新一轮的思考链永远无法显示。
+     * **主动退休**：旧句柄失效并通知客户端撤下它的显示，但气泡归属由新句柄继承。
+     * 子请求可能在工具等待超时后仍未结束，不能在换轮次时给它留下抢占父气泡的空档。
      */
     public static Handle beginRequest(LLMCallback callback) {
         try {
             if (callback == null) {
                 return null;
             }
-            Handle handle = new Handle(SESSION_IDS.incrementAndGet());
-            Handle previous = CURRENT.put(callback, handle);
+            Handle handle;
+            Handle previous;
+            synchronized (CURRENT) {
+                previous = CURRENT.get(callback);
+                Ownership ownership = previous == null ? new Ownership() : previous.ownership;
+                handle = new Handle(SESSION_IDS.incrementAndGet(), ownership);
+                CURRENT.put(callback, handle);
+                if (previous != null) {
+                    previous.ended = true;
+                }
+            }
             if (previous != null) {
-                previous.ended = true;
                 // 退休通知与下面的新阶段任务都排在同一条主线程队列上，顺序即语义：
                 // 客户端先收到旧会话的 CLEAR，再收到新会话的 THINKING。
                 submitForced(callback, () -> sendClear(previous));
@@ -170,7 +187,11 @@ public final class ThinkingDisplayService {
                 return;
             }
             handle.ended = true;
-            submitForced(callback, () -> sendClear(handle));
+            handle.ownership.ended = true;
+            submitForced(callback, () -> {
+                releaseOwnership(handle.ownership);
+                sendClear(handle);
+            });
         } catch (Throwable throwable) {
             debug("思考展示终态清理失败（已忽略）", throwable);
         }
@@ -382,60 +403,56 @@ public final class ThinkingDisplayService {
         UUID maidId = maid.getUUID();
         String dimension = maid.level().dimension().location().toString();
         BubbleKey key = new BubbleKey(dimension, maidId, bubbleId);
-        BubbleKey previousKey = handle.bubbleKey;
+        Ownership ownership = handle.ownership;
+        BubbleKey previousKey = ownership.bubbleKey;
         if (key.equals(previousKey)) {
             // 已持有该气泡：确认归属仍在。停服/卸载会清空归属表，这里允许重新认领，
             // 否则该会话会永久卡在「有绑定但无归属」而不再发布。
-            if (claimBubble(key, handle)) {
+            if (claimBubble(key, ownership)) {
                 applyBinding(handle, maidId, dimension, bubbleId);
                 return true;
             }
             return false;
         }
-        if (!claimBubble(key, handle)) {
+        if (!claimBubble(key, ownership)) {
             // 该气泡已由其他**存活**的展示会话负责：让位，旧归属保持不变以免误撤。
             return false;
         }
         if (previousKey != null) {
             // 换气泡：撤销旧气泡的归属，避免旧键一直被本会话占着。
-            OWNERS.remove(previousKey, handle);
+            OWNERS.remove(previousKey, ownership);
         }
-        handle.bubbleKey = key;
+        ownership.bubbleKey = key;
         applyBinding(handle, maidId, dimension, bubbleId);
         return true;
     }
 
     /**
-     * 认领气泡归属：**建立更早的存活会话**才是气泡的主人。
+     * 认领气泡归属：现有存活回调保留归属，不按单次请求的展示会话 ID 比较优先级。
      * <p>
-     * 不以「谁先调用这里」定胜负：父子会话可能在同一 tick 内各自认领（父请求在工具开始前
-     * 同步认领，子请求由工具创建后同样在下一 tick 认领），谁的 tick 任务先执行并不是语义。
-     * {@link Handle#displaySessionId} 在建立时单调递增，父请求必然早于它派生出的子请求，
-     * 因此按 ID 取小者得到的就是「父请求持有、子请求让位」，与遍历顺序无关。
-     * <p>
-     * 该比较是全序：建立更早的存活主人不会被建立更晚的会话夺走，因此不会出现两个会话
-     * 反复互相接管；原主人退休（会话结束、停服清理）后，剩余会话中最早的那个才接手。
+     * 父回调在工具执行前认领，同一回调后续请求复用令牌；即使子请求尚未结束而父请求已经
+     * 开始下一轮，也不会发生归属转移。单次请求退休与回调整轮终态是两个独立的生命周期。
      *
      * @return 本会话是否持有该气泡的归属
      */
-    private static boolean claimBubble(BubbleKey key, Handle handle) {
+    private static boolean claimBubble(BubbleKey key, Ownership ownership) {
         while (true) {
-            Handle current = OWNERS.get(key);
-            if (current == handle) {
+            Ownership current = OWNERS.get(key);
+            if (current == ownership) {
                 return true;
             }
             if (current == null) {
-                if (OWNERS.putIfAbsent(key, handle) == null) {
+                if (OWNERS.putIfAbsent(key, ownership) == null) {
                     return true;
                 }
                 continue;
             }
-            if (!current.ended && current.displaySessionId < handle.displaySessionId) {
-                // 存活且建立更早：它是主人，本会话让位。
+            if (!current.ended) {
+                // 其他回调仍持有该气泡：本回调让位。
                 return false;
             }
-            // 原主人已退休，或本会话建立得更早：用 CAS 接管，避免并发下覆盖别的存活归属。
-            if (OWNERS.replace(key, current, handle)) {
+            // 原回调已进入终态：用 CAS 接管，避免覆盖别的存活归属。
+            if (OWNERS.replace(key, current, ownership)) {
                 return true;
             }
         }
@@ -447,12 +464,12 @@ public final class ThinkingDisplayService {
         handle.bubbleId = bubbleId;
     }
 
-    /** 撤销该会话对气泡的归属（会话退休或换气泡时调用）。 */
-    private static void releaseOwnership(Handle handle) {
-        BubbleKey key = handle.bubbleKey;
+    /** 整轮终态撤销回调的气泡归属；单次请求退休只清理快照。 */
+    private static void releaseOwnership(Ownership ownership) {
+        BubbleKey key = ownership.bubbleKey;
         if (key != null) {
-            OWNERS.remove(key, handle);
-            handle.bubbleKey = null;
+            OWNERS.remove(key, ownership);
+            ownership.bubbleKey = null;
         }
     }
 
@@ -465,7 +482,6 @@ public final class ThinkingDisplayService {
     }
 
     private static void sendClear(Handle handle) {
-        releaseOwnership(handle);
         if (!handle.published || handle.maidId == null || handle.dimension == null) {
             // 从未发布过快照：客户端没有状态需要清理。
             return;
@@ -497,7 +513,9 @@ public final class ThinkingDisplayService {
         }
         for (Map.Entry<LLMCallback, Handle> entry : snapshot) {
             Handle handle = entry.getValue();
-            if (handle.ended || handle.bubbleKey == null || !maidId.equals(handle.maidId)) {
+            BubbleKey key = handle.ownership.bubbleKey;
+            if (handle.ended || key == null || OWNERS.get(key) != handle.ownership
+                    || !maidId.equals(handle.maidId)) {
                 continue;
             }
             sendSnapshotTo(handle, player);
