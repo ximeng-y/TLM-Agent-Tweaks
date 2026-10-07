@@ -11,7 +11,9 @@
   "client": [
     "HistoryAIChatScreenMixin",
     "AIChatScreenMixin",
-    "LLMSiteEditorScreenMixin"
+    "LLMSiteEditorScreenMixin",
+    "ChatBubbleRendererMixin",
+    "WaitingChatBubbleRendererAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

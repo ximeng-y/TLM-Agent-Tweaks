@@ -8,6 +8,7 @@ import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
 import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
 import com.xm2nd.tlmagenttweaks.common.stream.ProtocolStreamRequestListener;
 import com.xm2nd.tlmagenttweaks.common.stream.StreamEventType;
+import com.xm2nd.tlmagenttweaks.thinking.ThinkingDisplayService;
 
 import java.util.UUID;
 
@@ -17,17 +18,26 @@ import java.util.UUID;
  * <p>
  * 不再使用无上下文全局单例：订阅方（#2）必须能知道增量属于哪个女仆/站点/气泡。
  * 日志只记录请求 ID、协议、事件类型与字符数，不打印模型正文。
+ * <p>
+ * 同一批事件也按**本次请求的展示句柄**转发给思考链展示服务：句柄随请求新建，
+ * 因此旧请求的迟到增量不会影响新请求的展示。
  */
 public final class ProtocolStreamListener implements ProtocolStreamRequestListener {
     private final ProtocolStreamContext context;
+    private final LLMCallback callback;
+    private final ThinkingDisplayService.Handle displayHandle;
 
-    public ProtocolStreamListener(LLMOpenAISite site, LLMCallback callback) {
+    public ProtocolStreamListener(LLMOpenAISite site, LLMCallback callback,
+                                  ThinkingDisplayService.Handle displayHandle) {
         this.context = ProtocolStreamContext.capture(site, callback);
+        this.callback = callback;
+        this.displayHandle = displayHandle;
     }
 
     @Override
     public void onEvent(String requestId, StreamEventType type, String text) {
         ProtocolStreamHub.onEvent(context, requestId, type, text);
+        ThinkingDisplayService.onStreamEvent(callback, displayHandle, type, text);
         if (type == StreamEventType.COMPLETED || type == StreamEventType.FALLBACK
                 || type == StreamEventType.FAILED || type == StreamEventType.CANCELLED) {
             TlmAgentTweaks.LOGGER.debug("流式事件 requestId={} maid={} site={} type={}",

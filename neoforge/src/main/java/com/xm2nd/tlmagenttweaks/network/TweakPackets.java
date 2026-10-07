@@ -53,6 +53,9 @@ public final class TweakPackets {
                 TweakPackets::handleSavePrice);
         registrar.playToClient(PriceTablePayload.TYPE, PriceTablePayload.STREAM_CODEC,
                 TweakPackets::handlePriceTable);
+        // 思考链展示快照：新增的 optional S2C 通道，不支持它的客户端照常进服（不接收即可）
+        registrar.playToClient(ThinkingDisplayPayload.TYPE, ThinkingDisplayPayload.STREAM_CODEC,
+                TweakPackets::handleThinkingDisplay);
     }
 
     // ---------- 压缩 ----------
@@ -187,5 +190,11 @@ public final class TweakPackets {
             }
             context.reply(new PriceTablePayload(TokenStatsService.prices().snapshot()));
         });
+    }
+
+    // ---------- 思考链展示 ----------
+
+    private static void handleThinkingDisplay(ThinkingDisplayPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> ClientPacketHandlers.onThinkingDisplay(payload));
     }
 }

@@ -2,13 +2,18 @@ package com.xm2nd.tlmagenttweaks.mixin;
 
 import com.github.tartaricacid.touhoulittlemaid.ai.manager.entity.LLMCallback;
 import com.github.tartaricacid.touhoulittlemaid.ai.manager.response.ResponseChat;
+import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.LLMClient;
+import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.response.ToolCall;
 import com.xm2nd.tlmagenttweaks.protocol.stream.ProtocolHttpBridge;
+import com.xm2nd.tlmagenttweaks.thinking.ThinkingDisplayService;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.net.http.HttpRequest;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * TLM 工具执行等直接调用父类成功/失败的路径上的补充收尾入口。
@@ -17,6 +22,10 @@ import java.net.http.HttpRequest;
  * 那些走了 {@code super.onSuccess} / {@code super.onFailure} 的路径再次进入父类时，
  * 重复清理必须无副作用（{@link ProtocolHttpBridge#tryFinish} 竞争认领，幂等）。
  * 正常派发已提前完成清理，父类收尾不再承担分散的预算释放职责。
+ * <p>
+ * 另外在 {@code onSingleCall} 真正执行工具前切回原生提示阶段：该位置在原工具提示刷新之后、
+ * 真实工具执行之前，因此「模型返回了 tool_call 分片」不会被误当成工具已经开始执行。
+ * 本注入不替换工具调用，也不改变其 future 与续接逻辑。
  * <p>
  * 单状态终态语义：
  * <ul>
@@ -65,5 +74,27 @@ public abstract class LLMCallbackMixin {
             return;
         }
         ProtocolHttpBridge.tryFinish((LLMCallback) (Object) this);
+    }
+
+    /**
+     * 工具即将真正执行：等待气泡副文本改由原生工具提示占用，思考链让位。
+     * <p>
+     * 注入点在 {@code ITool.onCallAsync} 调用之前，即工具提示刷新之后、真实执行之前；
+     * 使用该方法当前实际使用的 {@code callback}（工具批次续接时可能已换成下一个回调），
+     * 因此展示跟随的是本次工具执行真正归属的那个会话。
+     * <p>
+     * 目标方法返回 {@code CompletableFuture<LLMCallback>}，因此回调类型必须是
+     * {@link CallbackInfoReturnable}：Mixin 在应用注入时按描述符校验，返回类型不匹配会直接
+     * 抛 {@code InvalidInjectionException} 而使目标类加载失败。本注入不读也不改返回值。
+     */
+    @Inject(method = "onSingleCall", at = @At(value = "INVOKE",
+            target = "Lcom/github/tartaricacid/touhoulittlemaid/ai/agent/tool/ITool;"
+                    + "onCallAsync(Ljava/lang/String;Ljava/lang/Object;"
+                    + "Lcom/github/tartaricacid/touhoulittlemaid/ai/manager/entity/LLMCallback;"
+                    + "Lcom/github/tartaricacid/touhoulittlemaid/ai/service/llm/LLMClient;)"
+                    + "Ljava/util/concurrent/CompletableFuture;"))
+    private void tlmAgentTweaks$onToolExecutionStart(ToolCall toolCall, LLMCallback callback, LLMClient client,
+                                                     CallbackInfoReturnable<CompletableFuture<LLMCallback>> cir) {
+        ThinkingDisplayService.onToolExecutionStart(callback);
     }
 }

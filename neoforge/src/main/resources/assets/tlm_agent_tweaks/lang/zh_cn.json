@@ -23,6 +23,9 @@
 
   "gui.tlm_agent_tweaks.stats_entry.title": "AI 功能增强",
   "gui.tlm_agent_tweaks.stats.back": "返回",
+  "gui.tlm_agent_tweaks.button.thinking_on": "显示思考链：开启",
+  "gui.tlm_agent_tweaks.button.thinking_off": "显示思考链：关闭",
+  "gui.tlm_agent_tweaks.button.thinking.tooltip": "仅控制本机玩家是否在等待气泡中滚动显示模型思考链，不影响工具提示与请求本身",
 
   "gui.tlm_agent_tweaks.stats.title": "Token 消耗详情",
   "gui.tlm_agent_tweaks.stats.tab.ranking": "玩家排行",

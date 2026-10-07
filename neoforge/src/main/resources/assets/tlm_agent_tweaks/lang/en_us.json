@@ -23,6 +23,9 @@
 
   "gui.tlm_agent_tweaks.stats_entry.title": "Agent Tweaks",
   "gui.tlm_agent_tweaks.stats.back": "Back",
+  "gui.tlm_agent_tweaks.button.thinking_on": "Show Thinking: On",
+  "gui.tlm_agent_tweaks.button.thinking_off": "Show Thinking: Off",
+  "gui.tlm_agent_tweaks.button.thinking.tooltip": "Only controls whether this client scrolls the model thinking in the waiting bubble; tool tips and the request itself are unaffected",
 
   "gui.tlm_agent_tweaks.stats.title": "Token Usage Details",
   "gui.tlm_agent_tweaks.stats.tab.ranking": "Ranking",
