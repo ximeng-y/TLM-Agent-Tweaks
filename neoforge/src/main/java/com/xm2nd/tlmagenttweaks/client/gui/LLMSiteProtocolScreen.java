@@ -218,7 +218,34 @@ public class LLMSiteProtocolScreen extends Screen {
                 this.contentLeft, this.panelTop + 134, previewColor);
 
         for (Renderable renderable : this.renderables) {
+            if (this.protocolOptions.contains(renderable) || this.urlModeOptions.contains(renderable)) {
+                continue;
+            }
             renderable.render(graphics, mouseX, mouseY, partialTick);
+        }
+
+        graphics.flush();
+
+        if (this.openMenu != Menu.NONE) {
+            List<FlatColorButton> menuOptions = this.openMenu == Menu.PROTOCOL
+                    ? this.protocolOptions : this.urlModeOptions;
+            int menuTop = menuOptions.get(0).getY();
+            int menuBottom = menuOptions.get(menuOptions.size() - 1).getY() + OPTION_HEIGHT;
+
+            graphics.pose().pushPose();
+            try {
+                graphics.pose().translate(0.0F, 0.0F, 350.0F);
+                graphics.fill(this.contentLeft, menuTop, this.contentLeft + this.contentWidth,
+                        menuBottom, 0xFF202020);
+                for (FlatColorButton option : menuOptions) {
+                    if (option.visible) {
+                        option.render(graphics, mouseX, mouseY, partialTick);
+                    }
+                }
+                graphics.flush();
+            } finally {
+                graphics.pose().popPose();
+            }
         }
     }
 
