@@ -44,6 +44,14 @@ public final class TweakPackets {
                 TweakPackets::handleCompressRequest);
         registrar.playToClient(CompressHistoryResultPayload.TYPE, CompressHistoryResultPayload.STREAM_CODEC,
                 TweakPackets::handleCompressResult);
+        registrar.playToServer(RequestCompressStatePayload.TYPE, RequestCompressStatePayload.STREAM_CODEC,
+                (payload, context) -> context.enqueueWork(() -> {
+                    if (context.player() instanceof ServerPlayer player) {
+                        ManualCompressService.handleStateRequest(player, payload.entityId());
+                    }
+                }));
+        registrar.playToClient(CompressHistoryStatePayload.TYPE, CompressHistoryStatePayload.STREAM_CODEC,
+                (payload, context) -> context.enqueueWork(() -> ClientPacketHandlers.onCompressState(payload)));
         registrar.playToServer(RequestTokenStatsPayload.TYPE, RequestTokenStatsPayload.STREAM_CODEC,
                 TweakPackets::handleStatsRequest);
         registrar.playToClient(TokenStatsDataPayload.TYPE, TokenStatsDataPayload.STREAM_CODEC,

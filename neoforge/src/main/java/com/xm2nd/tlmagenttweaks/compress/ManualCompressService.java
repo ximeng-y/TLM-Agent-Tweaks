@@ -7,6 +7,7 @@ import com.xm2nd.tlmagenttweaks.Config;
 import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
 import com.xm2nd.tlmagenttweaks.mixin.HistorySummaryManagerInvoker;
 import com.xm2nd.tlmagenttweaks.network.CompressHistoryResultPayload;
+import com.xm2nd.tlmagenttweaks.network.CompressHistoryStatePayload;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.neoforge.network.PacketDistributor;
@@ -30,6 +31,18 @@ public final class ManualCompressService {
     private static final int MIN_MESSAGES_TO_COMPRESS = 4;
 
     private ManualCompressService() {
+    }
+
+    public static void handleStateRequest(ServerPlayer player, int entityId) {
+        if (!(player.serverLevel().getEntity(entityId) instanceof EntityMaid maid) || !maid.isOwnedBy(player)) {
+            PacketDistributor.sendToPlayer(player,
+                    new CompressHistoryStatePayload(entityId, false, new CompoundTag()));
+            return;
+        }
+        MaidAIChatManager manager = maid.getAiChatManager();
+        boolean running = manager.historySummaryRunning;
+        PacketDistributor.sendToPlayer(player, new CompressHistoryStatePayload(entityId, running,
+                running ? new CompoundTag() : manager.writeToTag(new CompoundTag())));
     }
 
     public static void handleRequest(ServerPlayer player, int entityId) {
