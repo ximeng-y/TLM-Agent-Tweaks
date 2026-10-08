@@ -21,6 +21,7 @@ import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * 网络包注册与服务端处理。
@@ -98,7 +99,16 @@ public final class TweakPackets {
                             ranking, null, 0, List.of()));
                 }
                 case RequestTokenStatsPayload.VIEW_PLAYER_DETAIL -> {
-                    TokenStatsStore.PlayerDetail detail = store.playerDetail(payload.param(), TokenStatsService.prices());
+                    UUID playerId;
+                    try {
+                        playerId = UUID.fromString(payload.param());
+                    } catch (IllegalArgumentException exception) {
+                        TlmAgentTweaks.LOGGER.warn("拒绝来自 {} 的非法玩家 UUID 统计请求",
+                                serverPlayer.getGameProfile().getName());
+                        return;
+                    }
+                    TokenStatsStore.PlayerDetail detail =
+                            store.playerDetail(playerId.toString(), TokenStatsService.prices());
                     TokenStatsStore.PlayerSummary s = detail.summary();
                     context.reply(new TokenStatsDataPayload(RequestTokenStatsPayload.VIEW_PLAYER_DETAIL,
                             List.of(),
