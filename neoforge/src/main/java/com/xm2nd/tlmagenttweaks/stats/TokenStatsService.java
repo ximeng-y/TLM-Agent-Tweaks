@@ -44,6 +44,23 @@ public final class TokenStatsService {
         return PRICES;
     }
 
+    /** 统计记录中的 ownerName 可能为空；优先使用服务器掌握的真实玩家名。 */
+    public static String playerName(MinecraftServer server, String uuid, String recordedName) {
+        UUID id = UUID.fromString(uuid);
+        var online = server.getPlayerList().getPlayer(id);
+        if (online != null) {
+            return online.getGameProfile().getName();
+        }
+        if (server.getProfileCache() != null) {
+            var profile = server.getProfileCache().get(id);
+            if (profile.isPresent()) {
+                return profile.get().getName();
+            }
+        }
+        // 从未缓存过的离线玩家只能沿用历史名字；不发起外部账号查询。
+        return recordedName == null || recordedName.isBlank() ? uuid : recordedName;
+    }
+
     // ---------- 生命周期 ----------
 
     public static void onServerStarted(MinecraftServer server) {
