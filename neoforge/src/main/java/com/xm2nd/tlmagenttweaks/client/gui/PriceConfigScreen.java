@@ -228,7 +228,7 @@ public class PriceConfigScreen extends Screen {
 
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        super.render(graphics, mouseX, mouseY, partialTick);
+        this.renderBackground(graphics, mouseX, mouseY, partialTick);
 
         // 全屏灰暗遮罩 + 深灰居中面板，与协议设置页一致
         graphics.fillGradient(0, 0, this.width, this.height, 0xC0101010, 0xC0101010);
@@ -247,13 +247,6 @@ public class PriceConfigScreen extends Screen {
         String shownModel = this.model.isBlank() ? "—" : truncate(this.model, modelMaxWidth);
         graphics.drawString(this.font, shownModel, modelTextX, modelY,
                 isModelAvailable() ? 0xFFB8B8B8 : 0xFFFF7777);
-
-        // 长模型名在面板内裁切显示，悬停时展示完整名称
-        if (!this.model.isBlank() && this.font.width(this.model) > modelMaxWidth
-                && mouseX >= modelTextX && mouseX <= modelTextX + this.font.width(shownModel)
-                && mouseY >= modelY && mouseY <= modelY + 9) {
-            graphics.renderTooltip(this.font, Component.literal(this.model), mouseX, mouseY);
-        }
 
         // 货币行标题
         graphics.drawString(this.font, Component.translatable("gui.tlm_agent_tweaks.price.currency"),
@@ -277,6 +270,15 @@ public class PriceConfigScreen extends Screen {
 
         for (Renderable renderable : this.renderables) {
             renderable.render(graphics, mouseX, mouseY, partialTick);
+        }
+
+        // 长模型名悬停提示在全部控件之后绘制，多行拆分避免超出屏幕
+        if (!this.model.isBlank() && this.font.width(this.model) > modelMaxWidth
+                && mouseX >= modelTextX && mouseX <= modelTextX + this.font.width(shownModel)
+                && mouseY >= modelY && mouseY <= modelY + 9) {
+            graphics.renderTooltip(this.font,
+                    this.font.split(Component.literal(this.model), Math.min(300, this.width - 16)),
+                    mouseX, mouseY);
         }
     }
 

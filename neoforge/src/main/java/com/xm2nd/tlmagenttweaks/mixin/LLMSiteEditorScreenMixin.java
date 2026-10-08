@@ -127,9 +127,10 @@ public abstract class LLMSiteEditorScreenMixin {
             if (reasoningButton != null) {
                 reasoningButton.setX(priceX - 2 - 60);
             }
-            // 据此缩短模型名输入框，背景填充按 innerWidth 绘制
+            // 据此缩短模型名输入框：真实起点是 rowLeft+6（box.getX()），按该起点算宽，
+            // 保证输入框右缘停在按钮左侧 2px，不覆盖价格/思考按钮
             int nameEnd = (reasoningButton != null ? reasoningButton.getX() : priceX) - 2;
-            box.setWidth(Math.max(40, nameEnd - rowLeft));
+            box.setWidth(Math.max(40, nameEnd - box.getX()));
 
             final EditBox modelBox = box;
             FlatColorButton priceButton = new FlatColorButton(
