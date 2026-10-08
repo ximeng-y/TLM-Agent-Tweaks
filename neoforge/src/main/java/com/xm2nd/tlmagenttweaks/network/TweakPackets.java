@@ -90,7 +90,8 @@ public final class TweakPackets {
             switch (payload.viewType()) {
                 case RequestTokenStatsPayload.VIEW_RANKING -> {
                     List<TokenStatsDataPayload.RankEntry> ranking = store.playerRanking().stream()
-                            .map(p -> new TokenStatsDataPayload.RankEntry(p.uuid(), p.name(), p.input(), p.output(),
+                            .map(p -> new TokenStatsDataPayload.RankEntry(p.uuid(),
+                                    TokenStatsService.playerName(serverPlayer.getServer(), p.uuid(), p.name()), p.input(), p.output(),
                                     p.cacheRead(), p.cacheWrite(), p.requests()))
                             .toList();
                     context.reply(new TokenStatsDataPayload(RequestTokenStatsPayload.VIEW_RANKING,
@@ -101,7 +102,8 @@ public final class TweakPackets {
                     TokenStatsStore.PlayerSummary s = detail.summary();
                     context.reply(new TokenStatsDataPayload(RequestTokenStatsPayload.VIEW_PLAYER_DETAIL,
                             List.of(),
-                            new TokenStatsDataPayload.PlayerDetailDto(s.uuid(), s.name(), s.input(), s.output(),
+                            new TokenStatsDataPayload.PlayerDetailDto(s.uuid(),
+                                    TokenStatsService.playerName(serverPlayer.getServer(), s.uuid(), s.name()), s.input(), s.output(),
                                     s.cacheRead(), s.cacheWrite(), s.requests(), s.cacheHitRate(),
                                     detail.cost().cny(), detail.cost().anyCnyPrice(),
                                     detail.cost().usd(), detail.cost().anyUsdPrice()),

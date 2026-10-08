@@ -57,7 +57,11 @@ public class TokenStatsScreen extends Screen {
 
     private long consumedVersion = -1;
     private int rankingScroll;
-    private int detailIndex;
+    private String selectedPlayerUuid = "";
+    private TokenStatsDataPayload.PlayerDetailDto consumedDetail;
+    private Button playerSelector;
+    private boolean playerMenuOpen;
+    private int playerMenuScroll;
     /** 首次 init 时按当前页签发数据请求；rebuildWidgets 重入 init 时不再重复请求 */
     private boolean initialLoadDone;
 
@@ -72,6 +76,8 @@ public class TokenStatsScreen extends Screen {
 
     @Override
     protected void init() {
+        this.playerSelector = null;
+        this.playerMenuOpen = false;
         int top = 24;
         int w = 80;
         int gap = 4;
@@ -87,10 +93,20 @@ public class TokenStatsScreen extends Screen {
 
         if (this.tab == TAB_PLAYER) {
             int cy = this.height / 2 - 40;
-            this.addRenderableWidget(Button.builder(Component.literal("‹"), b -> cyclePlayer(-1))
-                    .bounds(this.width / 2 - 110, cy, 20, 20).build());
-            this.addRenderableWidget(Button.builder(Component.literal("›"), b -> cyclePlayer(1))
-                    .bounds(this.width / 2 + 90, cy, 20, 20).build());
+            this.playerSelector = this.addRenderableWidget(Button.builder(playerSelectionLabel(), b -> {
+                this.playerMenuOpen = !this.playerMenuOpen;
+                if (this.playerMenuOpen) {
+                    int index = 0;
+                    for (int i = 0; i < this.ranking.size(); i++) {
+                        if (this.ranking.get(i).uuid().equals(this.selectedPlayerUuid)) {
+                            index = i;
+                            break;
+                        }
+                    }
+                    this.playerMenuScroll = Math.min(index, Math.max(0, this.ranking.size() - playerMenuRows()));
+                }
+            }).bounds(this.width / 2 - 110, cy, 220, 20).build());
+            this.playerSelector.active = !this.ranking.isEmpty();
         } else if (this.tab == TAB_SERVER) {
             this.addRenderableWidget(Button.builder(
                             Component.translatable("gui.tlm_agent_tweaks.stats.server.window", WINDOW_LABELS[this.windowIndex]),
@@ -122,27 +138,18 @@ public class TokenStatsScreen extends Screen {
         this.rebuildWidgets();
     }
 
-    private void cyclePlayer(int delta) {
-        List<TokenStatsDataPayload.RankEntry> list = this.ranking;
-        if (list.isEmpty()) {
-            return;
-        }
-        this.detailIndex = Math.floorMod(this.detailIndex + delta, list.size());
-        requestDetail(list.get(this.detailIndex).uuid());
-    }
-
     /** 按当前页签发请求 */
     private void refreshRequest() {
         switch (this.tab) {
             case TAB_RANKING -> PacketDistributor.sendToServer(
                     new RequestTokenStatsPayload(TAB_RANKING, "", 0));
             case TAB_PLAYER -> {
-                // 排行数据用于玩家轮换列表
+                // 排行数据用于玩家下拉列表，以 UUID 保持选中对象。
                 PacketDistributor.sendToServer(new RequestTokenStatsPayload(TAB_RANKING, "", 0));
                 List<TokenStatsDataPayload.RankEntry> list = this.ranking;
                 if (!list.isEmpty()) {
-                    this.detailIndex = Math.min(this.detailIndex, list.size() - 1);
-                    requestDetail(list.get(this.detailIndex).uuid());
+                    requestDetail(list.stream().anyMatch(p -> p.uuid().equals(this.selectedPlayerUuid))
+                            ? this.selectedPlayerUuid : list.get(0).uuid());
                 } else {
                     this.loading = true;
                 }
@@ -154,7 +161,13 @@ public class TokenStatsScreen extends Screen {
     }
 
     private void requestDetail(String uuid) {
+        this.selectedPlayerUuid = uuid;
+        this.detail = null;
+        this.consumedDetail = ClientStatsCache.detail();
         this.loading = true;
+        if (this.playerSelector != null) {
+            this.playerSelector.setMessage(playerSelectionLabel());
+        }
         PacketDistributor.sendToServer(new RequestTokenStatsPayload(TAB_PLAYER, uuid, 0));
     }
 
@@ -190,6 +203,7 @@ public class TokenStatsScreen extends Screen {
             default -> {
             }
         }
+        renderPlayerMenu(graphics, mouseX, mouseY);
     }
 
     /** 消费服务端下发的最新数据 */
@@ -206,17 +220,34 @@ public class TokenStatsScreen extends Screen {
         }
         this.denied = false;
         int lastView = ClientStatsCache.lastViewType();
-        if (lastView == TAB_RANKING) {
-            this.ranking = ClientStatsCache.ranking();
-            // 玩家页签首次进入且尚无明细请求时，自动请求第一个玩家
-            if (this.tab == TAB_PLAYER && this.detail == null && !this.ranking.isEmpty()) {
-                this.detailIndex = 0;
-                requestDetail(this.ranking.get(0).uuid());
+        // 一帧内可能先后收到排行和明细，不能只消费 lastView 而遗漏排行响应。
+        List<TokenStatsDataPayload.RankEntry> cachedRanking = ClientStatsCache.ranking();
+        if (this.ranking != cachedRanking || lastView == TAB_RANKING) {
+            this.ranking = cachedRanking;
+            if (this.tab == TAB_PLAYER) {
+                if (this.ranking.isEmpty()) {
+                    this.selectedPlayerUuid = "";
+                    this.detail = null;
+                    this.loading = false;
+                } else if (this.ranking.stream().noneMatch(p -> p.uuid().equals(this.selectedPlayerUuid))) {
+                    requestDetail(this.ranking.get(0).uuid());
+                }
+                this.playerMenuOpen = false;
+                if (this.playerSelector != null) {
+                    this.playerSelector.active = !this.ranking.isEmpty();
+                    this.playerSelector.setMessage(playerSelectionLabel());
+                }
             }
-        } else if (lastView == TAB_PLAYER) {
-            this.detail = ClientStatsCache.detail();
-            this.loading = false;
-        } else if (lastView == TAB_SERVER) {
+        }
+        TokenStatsDataPayload.PlayerDetailDto cachedDetail = ClientStatsCache.detail();
+        if (cachedDetail != this.consumedDetail) {
+            this.consumedDetail = cachedDetail;
+            if (cachedDetail != null && cachedDetail.uuid().equals(this.selectedPlayerUuid)) {
+                this.detail = cachedDetail;
+                this.loading = false;
+            }
+        }
+        if (lastView == TAB_SERVER) {
             this.buckets = ClientStatsCache.buckets();
             this.loading = false;
         }
@@ -270,6 +301,18 @@ public class TokenStatsScreen extends Screen {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (this.playerMenuOpen && this.playerSelector != null) {
+            int top = playerMenuTop();
+            int rows = playerMenuRows();
+            if (button == 0 && mouseX >= this.playerSelector.getX()
+                    && mouseX < this.playerSelector.getX() + this.playerSelector.getWidth()
+                    && mouseY >= top && mouseY < top + rows * 20) {
+                int index = this.playerMenuScroll + (int) ((mouseY - top) / 20);
+                requestDetail(this.ranking.get(index).uuid());
+            }
+            this.playerMenuOpen = false;
+            return true;
+        }
         // 记录点击位置对应的排行行，render 中换算（简化处理：直接在点击时计算行号）
         if (this.tab == TAB_RANKING && button == 0) {
             List<TokenStatsDataPayload.RankEntry> list = this.ranking;
@@ -281,7 +324,6 @@ public class TokenStatsScreen extends Screen {
                 int row = (int) ((mouseY - top) / RANKING_ROW_HEIGHT) + this.rankingScroll;
                 if (row >= 0 && row < list.size()) {
                     this.tab = TAB_PLAYER;
-                    this.detailIndex = row;
                     requestDetail(list.get(row).uuid());
                     this.rebuildWidgets();
                     return true;
@@ -305,9 +347,6 @@ public class TokenStatsScreen extends Screen {
         }
         int cx = this.width / 2;
         int y = this.height / 2 - 40;
-        String name = dto.name() == null || dto.name().isBlank() ? dto.uuid() : dto.name();
-        graphics.drawCenteredString(this.font, name, cx, y + 6, 0xFFFFFF);
-
         int left = cx - 110;
         int startY = y + 34;
         int line = 14;
@@ -504,11 +543,76 @@ public class TokenStatsScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        if (this.playerMenuOpen) {
+            this.playerMenuScroll = Math.max(0, Math.min(this.ranking.size() - playerMenuRows(),
+                    this.playerMenuScroll - (int) Math.signum(scrollY)));
+            return true;
+        }
         if (this.tab == TAB_RANKING) {
             this.rankingScroll = Math.max(0, this.rankingScroll - (int) Math.signum(scrollY));
             return true;
         }
         return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
+    }
+
+    private Component playerSelectionLabel() {
+        for (TokenStatsDataPayload.RankEntry player : this.ranking) {
+            if (player.uuid().equals(this.selectedPlayerUuid)) {
+                return Component.literal(player.name() + " ▾");
+            }
+        }
+        return Component.translatable("gui.tlm_agent_tweaks.stats.empty");
+    }
+
+    private int playerMenuTop() {
+        return this.playerSelector.getY() + this.playerSelector.getHeight() + 2;
+    }
+
+    private int playerMenuRows() {
+        return Math.min(this.ranking.size(), Math.max(1, Math.min(8, (this.height - playerMenuTop() - 8) / 20)));
+    }
+
+    private void renderPlayerMenu(GuiGraphics graphics, int mouseX, int mouseY) {
+        if (!this.playerMenuOpen || this.playerSelector == null || this.ranking.isEmpty()) {
+            return;
+        }
+        int left = this.playerSelector.getX();
+        int right = left + this.playerSelector.getWidth();
+        int top = playerMenuTop();
+        int rows = playerMenuRows();
+        graphics.flush();
+        graphics.pose().pushPose();
+        try {
+            graphics.pose().translate(0, 0, 350);
+            graphics.fill(left, top, right, top + rows * 20, 0xFF202020);
+            for (int i = 0; i < rows; i++) {
+                var player = this.ranking.get(this.playerMenuScroll + i);
+                int y = top + i * 20;
+                boolean hover = mouseX >= left && mouseX < right && mouseY >= y && mouseY < y + 20;
+                if (hover || player.uuid().equals(this.selectedPlayerUuid)) {
+                    graphics.fill(left, y, right, y + 20, hover ? 0xFF555555 : 0xFF383838);
+                }
+                graphics.drawString(this.font, this.font.plainSubstrByWidth(player.name(), right - left - 12),
+                        left + 6, y + 6, 0xFFFFFF);
+            }
+            if (this.ranking.size() > rows) {
+                int thumbHeight = Math.max(4, rows * 20 * rows / this.ranking.size());
+                int thumbTop = top + (rows * 20 - thumbHeight) * this.playerMenuScroll / (this.ranking.size() - rows);
+                graphics.fill(right - 2, thumbTop, right, thumbTop + thumbHeight, 0xFFAAAAAA);
+            }
+            graphics.flush();
+        } finally {
+            graphics.pose().popPose();
+        }
+    }
+
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (keyCode == 256 && this.playerMenuOpen) {
+            this.playerMenuOpen = false;
+            return true;
+        }
+        return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
     @Override
