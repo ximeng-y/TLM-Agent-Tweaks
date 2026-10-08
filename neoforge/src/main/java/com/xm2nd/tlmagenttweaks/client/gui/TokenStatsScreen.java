@@ -54,6 +54,7 @@ public class TokenStatsScreen extends Screen {
     private volatile List<TokenStatsDataPayload.BucketDto> buckets = List.of();
     private volatile boolean loading;
     private volatile boolean denied;
+    private Component hoverTooltip;
 
     private long consumedVersion = -1;
     private int rankingScroll;
@@ -159,6 +160,8 @@ public class TokenStatsScreen extends Screen {
     }
 
     private void requestServer() {
+        this.buckets = List.of();
+        this.hoverTooltip = null;
         this.loading = true;
         PacketDistributor.sendToServer(new RequestTokenStatsPayload(TAB_SERVER, "", WINDOW_OPTIONS[this.windowIndex]));
         this.rebuildWidgets();
@@ -166,6 +169,7 @@ public class TokenStatsScreen extends Screen {
 
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        this.hoverTooltip = null;
         super.render(graphics, mouseX, mouseY, partialTick);
         pollCache();
 
@@ -186,9 +190,12 @@ public class TokenStatsScreen extends Screen {
         switch (this.tab) {
             case TAB_RANKING -> renderRanking(graphics, mouseX, mouseY);
             case TAB_PLAYER -> renderPlayerDetail(graphics);
-            case TAB_SERVER -> renderServer(graphics);
+            case TAB_SERVER -> renderServer(graphics, mouseX, mouseY);
             default -> {
             }
+        }
+        if (this.hoverTooltip != null) {
+            graphics.renderTooltip(this.font, this.hoverTooltip, mouseX, mouseY);
         }
     }
 
@@ -217,8 +224,10 @@ public class TokenStatsScreen extends Screen {
             this.detail = ClientStatsCache.detail();
             this.loading = false;
         } else if (lastView == TAB_SERVER) {
-            this.buckets = ClientStatsCache.buckets();
-            this.loading = false;
+            if (ClientStatsCache.serverWindowDays() == WINDOW_OPTIONS[this.windowIndex]) {
+                this.buckets = ClientStatsCache.buckets();
+                this.loading = false;
+            }
         }
         // 排行响应也让玩家页签的等待结束（但明细未到时仍显示加载）
         if (this.tab == TAB_RANKING && lastView == TAB_RANKING) {
@@ -263,7 +272,8 @@ public class TokenStatsScreen extends Screen {
             graphics.drawString(this.font, name, left, y, 0xFFFFFF);
             graphics.drawString(this.font, NumUtil.formatTokens(entry.total()), right - this.font.width(NumUtil.formatTokens(entry.total())), y, 0xCCCCCC);
             drawStackedBarH(graphics, left + 90, y + 9, right - left - 90 - 50, 6,
-                    entry.input(), entry.output(), entry.cacheRead(), entry.cacheWrite(), maxTotal);
+                    entry.input(), entry.output(), entry.cacheRead(), entry.cacheWrite(), maxTotal,
+                    mouseX, mouseY, name);
         }
         graphics.disableScissor();
     }
@@ -337,7 +347,7 @@ public class TokenStatsScreen extends Screen {
 
     // ---------- 服务器总览视图 ----------
 
-    private void renderServer(GuiGraphics graphics) {
+    private void renderServer(GuiGraphics graphics, int mouseX, int mouseY) {
         renderLegend(graphics, 74);
 
         List<TokenStatsDataPayload.BucketDto> list = this.buckets;
@@ -389,14 +399,20 @@ public class TokenStatsScreen extends Screen {
             long total = bucket.total();
             if (total > 0) {
                 int barBottom = bottom;
-                int h1 = segHeight(bucket.input(), chartHeight, maxTotal);
-                int h2 = segHeight(bucket.output(), chartHeight, maxTotal);
-                int h3 = segHeight(bucket.cacheRead(), chartHeight, maxTotal);
-                int h4 = segHeight(bucket.cacheWrite(), chartHeight, maxTotal);
-                graphics.fill(barX, barBottom - h1, barX + barWidth, barBottom, COLOR_INPUT);
-                graphics.fill(barX, barBottom - h1 - h2, barX + barWidth, barBottom - h1, COLOR_OUTPUT);
-                graphics.fill(barX, barBottom - h1 - h2 - h3, barX + barWidth, barBottom - h1 - h2, COLOR_CACHE_READ);
-                graphics.fill(barX, barBottom - h1 - h2 - h3 - h4, barX + barWidth, barBottom - h1 - h2 - h3, COLOR_CACHE_WRITE);
+                int y1 = barBottom - segHeight(bucket.input(), chartHeight, maxTotal);
+                int y2 = barBottom - segHeight(bucket.input() + bucket.output(), chartHeight, maxTotal);
+                int y3 = barBottom - segHeight(bucket.input() + bucket.output() + bucket.cacheRead(),
+                        chartHeight, maxTotal);
+                int y4 = barBottom - segHeight(total, chartHeight, maxTotal);
+                String title = bucketRangeLabel(bucket);
+                drawTokenSegment(graphics, barX, y1, barX + barWidth, barBottom, COLOR_INPUT,
+                        title, "gui.tlm_agent_tweaks.stats.legend.input", bucket.input(), mouseX, mouseY);
+                drawTokenSegment(graphics, barX, y2, barX + barWidth, y1, COLOR_OUTPUT,
+                        title, "gui.tlm_agent_tweaks.stats.legend.output", bucket.output(), mouseX, mouseY);
+                drawTokenSegment(graphics, barX, y3, barX + barWidth, y2, COLOR_CACHE_READ,
+                        title, "gui.tlm_agent_tweaks.stats.legend.cache_read", bucket.cacheRead(), mouseX, mouseY);
+                drawTokenSegment(graphics, barX, y4, barX + barWidth, y3, COLOR_CACHE_WRITE,
+                        title, "gui.tlm_agent_tweaks.stats.legend.cache_write", bucket.cacheWrite(), mouseX, mouseY);
             }
             // 折线点（画在柱上，取桶中心）
             int centerX = barX + barWidth / 2;
@@ -461,24 +477,54 @@ public class TokenStatsScreen extends Screen {
 
     /** 横向四色堆叠条 */
     private void drawStackedBarH(GuiGraphics graphics, int x, int y, int maxWidth, int height,
-                                 long input, long output, long cacheRead, long cacheWrite, long maxTotal) {
+                                 long input, long output, long cacheRead, long cacheWrite, long maxTotal,
+                                 int mouseX, int mouseY, String title) {
         long total = input + output + cacheRead + cacheWrite;
-        if (total <= 0 || maxWidth <= 0) {
+        if (total <= 0 || maxWidth <= 0 || maxTotal <= 0) {
             return;
         }
         int used = (int) Math.round(maxWidth * (total / (double) maxTotal));
-        int w1 = (int) Math.round(used * (input / (double) total));
-        int w2 = (int) Math.round(used * (output / (double) total));
-        int w3 = (int) Math.round(used * (cacheRead / (double) total));
-        int w4 = Math.max(0, used - w1 - w2 - w3);
-        int cursor = x;
-        graphics.fill(cursor, y, cursor + w1, y + height, COLOR_INPUT);
-        cursor += w1;
-        graphics.fill(cursor, y, cursor + w2, y + height, COLOR_OUTPUT);
-        cursor += w2;
-        graphics.fill(cursor, y, cursor + w3, y + height, COLOR_CACHE_READ);
-        cursor += w3;
-        graphics.fill(cursor, y, cursor + w4, y + height, COLOR_CACHE_WRITE);
+        if (used <= 0) {
+            return;
+        }
+        int b1 = x + (int) Math.round(used * (input / (double) total));
+        int b2 = x + (int) Math.round(used * ((input + output) / (double) total));
+        int b3 = x + (int) Math.round(used * ((input + output + cacheRead) / (double) total));
+        int b4 = x + used;
+        drawTokenSegment(graphics, x, y, b1, y + height, COLOR_INPUT,
+                title, "gui.tlm_agent_tweaks.stats.legend.input", input, mouseX, mouseY);
+        drawTokenSegment(graphics, b1, y, b2, y + height, COLOR_OUTPUT,
+                title, "gui.tlm_agent_tweaks.stats.legend.output", output, mouseX, mouseY);
+        drawTokenSegment(graphics, b2, y, b3, y + height, COLOR_CACHE_READ,
+                title, "gui.tlm_agent_tweaks.stats.legend.cache_read", cacheRead, mouseX, mouseY);
+        drawTokenSegment(graphics, b3, y, b4, y + height, COLOR_CACHE_WRITE,
+                title, "gui.tlm_agent_tweaks.stats.legend.cache_write", cacheWrite, mouseX, mouseY);
+    }
+
+    /** 绘制一个真实可见色块，并使用完全相同的半开矩形做命中。 */
+    private void drawTokenSegment(GuiGraphics graphics, int x1, int y1, int x2, int y2, int color,
+                                  String title, String typeKey, long value, int mouseX, int mouseY) {
+        if (x1 >= x2 || y1 >= y2) {
+            return;
+        }
+        graphics.fill(x1, y1, x2, y2, color);
+        if (mouseX >= x1 && mouseX < x2 && mouseY >= y1 && mouseY < y2) {
+            this.hoverTooltip = Component.literal(title)
+                    .append("\n")
+                    .append(Component.translatable(typeKey))
+                    .append(": ")
+                    .append(Long.toString(value));
+        }
+    }
+
+    /** 使用桶的真实起止日期；单日桶只显示一天。 */
+    private static String bucketRangeLabel(TokenStatsDataPayload.BucketDto bucket) {
+        LocalDate start = LocalDate.ofEpochDay(bucket.startDay());
+        LocalDate end = LocalDate.ofEpochDay(bucket.endDay());
+        if (bucket.unitOrdinal() == GranularityUtil.BucketUnit.DAY.ordinal() || start.equals(end)) {
+            return start.toString();
+        }
+        return start + " ~ " + end;
     }
 
     /** 柱段高度换算 */
