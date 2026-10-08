@@ -195,7 +195,9 @@ public class TokenStatsScreen extends Screen {
             }
         }
         if (this.hoverTooltip != null) {
-            graphics.renderTooltip(this.font, this.hoverTooltip, mouseX, mouseY);
+            graphics.renderTooltip(this.font,
+                    this.font.split(this.hoverTooltip, Math.min(260, Math.max(1, this.width - 16))),
+                    mouseX, mouseY);
         }
     }
 
