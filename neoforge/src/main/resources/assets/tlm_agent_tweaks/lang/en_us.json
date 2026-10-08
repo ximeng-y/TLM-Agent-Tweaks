@@ -6,8 +6,8 @@
   "gui.tlm_agent_tweaks.navigation.selftalk.tooltip": "Self-Talk Settings",
   "gui.tlm_agent_tweaks.button.compress_history": "Compress History",
   "gui.tlm_agent_tweaks.button.compress_history.pending": "Compressing…",
-  "gui.tlm_agent_tweaks.button.price": "Price",
-  "gui.tlm_agent_tweaks.button.protocol": "Protocol",
+  "gui.tlm_agent_tweaks.button.price": "Price (Optional)",
+  "gui.tlm_agent_tweaks.button.protocol": "Protocol Settings",
   "gui.tlm_agent_tweaks.button.token_stats": "Token Stats",
   "gui.tlm_agent_tweaks.llm.title": "Protocol Settings",
   "gui.tlm_agent_tweaks.llm.protocol": "Protocol: %s",
@@ -52,6 +52,7 @@
   "gui.tlm_agent_tweaks.price.model": "Model",
   "gui.tlm_agent_tweaks.price.currency.cny": "CNY ¥",
   "gui.tlm_agent_tweaks.price.currency.usd": "USD $",
+  "gui.tlm_agent_tweaks.price.currency": "Currency",
   "gui.tlm_agent_tweaks.price.input": "Input",
   "gui.tlm_agent_tweaks.price.output": "Output",
   "gui.tlm_agent_tweaks.price.cache_read": "Cache read",
@@ -63,6 +64,7 @@
   "gui.tlm_agent_tweaks.price.no_sites": "No LLM sites available (admin must configure first)",
   "gui.tlm_agent_tweaks.price.bad_number": "Prices must be non-negative numbers (blank = 0)",
   "gui.tlm_agent_tweaks.price.sending": "Sent, waiting for server…",
+  "gui.tlm_agent_tweaks.price.save_site_model_first": "Save the site and current model first",
 
   "disconnect.tlm_agent_tweaks.missing_server": "Cannot join: this server does not have TLM Agent Tweaks installed (server-side support is required)",
 

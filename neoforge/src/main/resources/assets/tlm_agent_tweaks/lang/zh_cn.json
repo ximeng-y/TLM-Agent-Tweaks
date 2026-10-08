@@ -6,8 +6,8 @@
   "gui.tlm_agent_tweaks.navigation.selftalk.tooltip": "Self-Talk 设置",
   "gui.tlm_agent_tweaks.button.compress_history": "压缩聊天记录",
   "gui.tlm_agent_tweaks.button.compress_history.pending": "压缩中…",
-  "gui.tlm_agent_tweaks.button.price": "价格",
-  "gui.tlm_agent_tweaks.button.protocol": "协议",
+  "gui.tlm_agent_tweaks.button.price": "价格(选填)",
+  "gui.tlm_agent_tweaks.button.protocol": "协议设置",
   "gui.tlm_agent_tweaks.button.token_stats": "Token 统计",
   "gui.tlm_agent_tweaks.llm.title": "协议设置",
   "gui.tlm_agent_tweaks.llm.protocol": "协议：%s",
@@ -52,6 +52,7 @@
   "gui.tlm_agent_tweaks.price.model": "模型",
   "gui.tlm_agent_tweaks.price.currency.cny": "CNY ¥",
   "gui.tlm_agent_tweaks.price.currency.usd": "USD $",
+  "gui.tlm_agent_tweaks.price.currency": "货币",
   "gui.tlm_agent_tweaks.price.input": "输入",
   "gui.tlm_agent_tweaks.price.output": "输出",
   "gui.tlm_agent_tweaks.price.cache_read": "缓存命中",
@@ -63,6 +64,7 @@
   "gui.tlm_agent_tweaks.price.no_sites": "暂无可用 LLM 站点（需管理员先配置）",
   "gui.tlm_agent_tweaks.price.bad_number": "价格须为非负数字（留空视为 0）",
   "gui.tlm_agent_tweaks.price.sending": "已发送，等待服务器确认…",
+  "gui.tlm_agent_tweaks.price.save_site_model_first": "请先保存站点及当前模型",
 
   "disconnect.tlm_agent_tweaks.missing_server": "无法加入：该服务器未安装 TLM Agent Tweaks（本 mod 需要服务端支持才能工作）",
 
