@@ -83,6 +83,8 @@
   "chat.tlm_agent_tweaks.retry": "请求失败，%s 秒后重试（第 %s/%s 次）",
   "chat.tlm_agent_tweaks.retry.rate_limited": "请求过于频繁，%s 秒后重试（第 %s/%s 次）",
   "chat.tlm_agent_tweaks.retry.fallback": "流式响应中断，正在改用普通模式重试…",
+  "chat.tlm_agent_tweaks.retry.fallback.sent": "已改用普通模式发送，等待响应…",
+  "chat.tlm_agent_tweaks.retry.transport": "流式连接中断，%s 秒后重新发起流式请求…",
   "chat.tlm_agent_tweaks.retry.site_queue": "站点繁忙，正在排队等待发送（已重试 %s/%s 次）",
   "chat.tlm_agent_tweaks.retry.site_queue.first": "站点繁忙，正在排队等待发送…",
 
@@ -96,5 +98,5 @@
   "config.tlm_agent_tweaks.record_summary": "压缩摘要请求计入统计",
   "config.tlm_agent_tweaks.record_summary.tooltip": "历史压缩的摘要请求同样消耗 token，默认计入统计",
   "config.tlm_agent_tweaks.retry_enabled": "启用请求失败自动重试",
-  "config.tlm_agent_tweaks.retry_enabled.tooltip": "开启后，429 与 500/502/503/504 最多额外重试 2 次，每次固定等待 5 秒（忽略 Retry-After）；站点冷却期间后到的请求会排队延后发送。关闭后不做重试与站点冷却，但流式断流改用普通模式重发的行为不受影响"
+  "config.tlm_agent_tweaks.retry_enabled.tooltip": "开启后，429 与 500/502/503/504 最多额外重试 2 次，每次固定等待 5 秒（忽略 Retry-After）；流式请求在收到响应头前断连时保持流式重发一次；站点冷却期间后到的请求会排队延后发送。关闭后不做重试、不做站点冷却，但流式断流改用普通模式重发的行为不受影响"
 }

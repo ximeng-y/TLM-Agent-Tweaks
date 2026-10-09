@@ -61,28 +61,38 @@ final class RetryNotifier implements StreamingHttpTransport.AttemptListener {
     @Override
     public void onScheduled(StreamingHttpTransport.AttemptListener.Stage stage,
                             boolean firstAttempt, int retryOrdinal, boolean rateLimited,
-                            boolean fallback) {
+                            StreamingHttpTransport.AttemptListener.Cause cause) {
         if (closed.get()) {
             return;
         }
         Component text;
         if (stage == StreamingHttpTransport.AttemptListener.Stage.SITE_QUEUE) {
             text = RetryBubble.siteQueue(retryOrdinal, policy.maxRetries(), firstAttempt);
-        } else if (fallback) {
+        } else if (cause == StreamingHttpTransport.AttemptListener.Cause.FALLBACK) {
             // 非流式重发不消耗状态码重试次数，因此不显示「第几次」。
             text = RetryBubble.fallback();
+        } else if (cause == StreamingHttpTransport.AttemptListener.Cause.TRANSPORT_RETRY) {
+            text = RetryBubble.transportRetry();
         } else {
             text = RetryBubble.retry(retryOrdinal, policy.maxRetries(), rateLimited);
         }
         // 排队与重试提示要占用气泡副文本：先切回原生提示，思考链让位给 TLM 自己的文字。
-        ThinkingDisplayService.onNativeStage(callback, displayHandle, fallback);
+        // 只有回退会关闭本轮的思考播放；传输重试与状态码重试之后仍会恢复滚动。
+        ThinkingDisplayService.onNativeStage(callback, displayHandle,
+                cause == StreamingHttpTransport.AttemptListener.Cause.FALLBACK);
         show(text);
     }
 
     @Override
-    public void onSendStart(boolean firstAttempt) {
-        // 普通流式重试真正发出时重新从空窗口开始播放思考；
-        // 已回退非流式的请求会被展示服务忽略，不会重播中断流残片。
+    public void onSendStart(boolean firstAttempt, boolean fallback) {
+        if (fallback) {
+            // 非流式回退真正发出：明确当前模式与「已发出、等待响应」，
+            // 避免整段重发期间看起来仍停在等待重试。
+            ThinkingDisplayService.onNativeStage(callback, displayHandle, true);
+            show(RetryBubble.fallbackSent());
+            return;
+        }
+        // 流式重试真正发出时重新从空窗口开始播放思考；不会重播中断流残片。
         ThinkingDisplayService.onSendStart(callback, displayHandle, firstAttempt);
     }
 

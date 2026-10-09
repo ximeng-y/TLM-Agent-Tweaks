@@ -42,14 +42,19 @@ import java.util.concurrent.atomic.AtomicReference;
  * 纯 JDK 流式 HTTP 状态机：流式优先、断流非流式回退、指定 HTTP 状态码重试。
  * <p>
  * 一个 {@link Session} 对应一次逻辑模型请求，其内部至多发生
- * {@code 1 + maxRetries + 1} 次实际 HTTP 尝试：
+ * {@code 1 + 1 + maxRetries + 1} 次实际 HTTP 尝试，三条路径各自计数、互不占用对方额度：
  * <ul>
+ *   <li><b>传输重试</b>：流式请求在**收到响应头之前**断连（连接刚建立就断开、网关闪断）时，
+ *       用同一份冻结请求体保持 {@code stream:true} 重发一次。响应头前断连与是否流式无关，
+ *       改用非流式同样连不上，因此这条路径不回退；它受 {@code retry.enabled} 控制，
+ *       关闭时保留 #8 的断流回退行为；</li>
  *   <li><b>状态码重试</b>：429 / 500 / 502 / 503 / 504，最多 {@code maxRetries} 次，
  *       每次固定等待 {@code retryDelay}（忽略 {@code Retry-After}，不做指数退避与抖动）；</li>
  *   <li><b>非流式回退</b>：仅在服务端明确不支持 {@code stream}/{@code stream_options}，
- *       或流式读取中途失败时发生一次；此后所有尝试都保持 {@code stream:false}；</li>
- *   <li>两者各自计数、互不占用对方额度；断流不会重复消耗状态码重试次数；</li>
- *   <li>额度耗尽后，最后一次的错误响应（状态码 + 截断后的正文）原样交回调用方。</li>
+ *       或流式读取中途失败（已收到响应头、SSE 中断/超时/缺终止标志、分片聚合失败）时
+ *       发生一次；此后所有尝试都保持 {@code stream:false}；</li>
+ *   <li>传输重试额度耗尽后不再回退，直接上报失败；状态码重试额度耗尽后，最后一次的错误
+ *       响应（状态码 + 截断后的正文）原样交回调用方。</li>
  * </ul>
  * 冻结请求体只解一次，全部尝试复用同一份正文、模型、消息、工具结果与鉴权头；
  * 重试不经过 {@code LLMClient.chat}，因此不会重新构造历史、不会重复执行工具。
@@ -255,11 +260,11 @@ public final class StreamingHttpTransport {
         AttemptListener NO_OP = new AttemptListener() {
             @Override
             public void onScheduled(Stage stage, boolean firstAttempt, int retryOrdinal,
-                                    boolean rateLimited, boolean fallback) {
+                                    boolean rateLimited, Cause cause) {
             }
 
             @Override
-            public void onSendStart(boolean firstAttempt) {
+            public void onSendStart(boolean firstAttempt, boolean fallback) {
             }
         };
 
@@ -269,21 +274,35 @@ public final class StreamingHttpTransport {
          * @param stage        等待类型
          * @param firstAttempt 是否为整轮请求的第一次发送（首次发送不等待）
          * @param retryOrdinal 已消耗的状态码重试次数（1 起；站点排队场景为 0）
-         * @param rateLimited  上一次尝试是否因 429 被限流
-         * @param fallback     本次尝试是否为流式中断后的首次非流式重发
-         *                     （与状态码重试共用等待，但提示文案不同）
+         * @param rateLimited  上一次尝试是否因 429 被限流（状态而非起因，不能并入 {@code cause}）
+         * @param cause        本次尝试的起因；三类等待共用同一条调度时间线，仅提示文案不同
          */
         void onScheduled(Stage stage, boolean firstAttempt, int retryOrdinal, boolean rateLimited,
-                         boolean fallback);
+                         Cause cause);
 
-        /** 等待结束，即将真正发出。 */
-        void onSendStart(boolean firstAttempt);
+        /**
+         * 等待结束，即将真正发出。
+         *
+         * @param firstAttempt 是否为整轮请求的第一次发送
+         * @param fallback     本次真正发出的是否为非流式回退（其余尝试都是流式）
+         */
+        void onSendStart(boolean firstAttempt, boolean fallback);
 
         enum Stage {
             /** 本次请求自身的固定重试等待。 */
             RETRY_WAIT,
             /** 站点冷却或积压导致的排队。 */
             SITE_QUEUE
+        }
+
+        /** 本次尝试的起因：区分提示文案，也决定展示层如何处理思考链。 */
+        enum Cause {
+            /** 状态码重试（429 / 5xx）：保持当前模式重发。 */
+            RETRY,
+            /** 响应头前断连：保持流式重发。 */
+            TRANSPORT_RETRY,
+            /** 流式读取中途失败：改用非流式重发。 */
+            FALLBACK
         }
     }
 
@@ -302,6 +321,8 @@ public final class StreamingHttpTransport {
         private final AtomicInteger statusRetries = new AtomicInteger();
         /** statusRetries 已在 wait 中就绪时置位，保证真正的发送只消耗一次额度。 */
         private final AtomicBoolean retryReserved = new AtomicBoolean();
+        /** 响应头前断连的流式重发是否已用掉；单点写入，但取消与状态码分支也会读。 */
+        private final AtomicBoolean transportRetried = new AtomicBoolean();
 
         private volatile HttpClient client;
         private volatile String siteId = SendGate.DEFAULT_SITE;
@@ -314,8 +335,6 @@ public final class StreamingHttpTransport {
         private volatile int dispatchCount;
         /** 上一次尝试是否因 429 被限流，用于重试等待文案。 */
         private volatile boolean rateLimited;
-        /** 本轮最近一次提交的尝试是否为流式，用于区分回退与已回退后的状态码重试。 */
-        private volatile boolean streamUsed = true;
 
         private Session(FrozenRequest frozen, SiteProtocol protocol,
                         ProtocolStreamRequestListener listener, Duration timeout) {
@@ -338,6 +357,11 @@ public final class StreamingHttpTransport {
             return usedFallback;
         }
 
+        /** 响应头前断连的流式重发是否已用掉（诊断与测试用）。 */
+        public boolean transportRetried() {
+            return transportRetried.get();
+        }
+
         private void start() {
             result.whenComplete((response, failure) -> {
                 if (result.isCancelled()) {
@@ -348,11 +372,11 @@ public final class StreamingHttpTransport {
                 return;
             }
             emit(StreamEventType.STARTED, "");
-            attempt(true);
+            attempt(true, null);
         }
 
         /** 提交一次尝试：先经过发送闸门（重试等待 + 站点冷却 + 积压间隔），再真正发出。 */
-        private void attempt(boolean streaming) {
+        private void attempt(boolean streaming, AttemptListener.Cause cause) {
             if (isFinished()) {
                 return;
             }
@@ -365,27 +389,25 @@ public final class StreamingHttpTransport {
                 finish(null, e);
                 return;
             }
-            dispatch(rebuild(body), streaming);
+            dispatch(rebuild(body), streaming, cause);
         }
 
-        private void dispatch(HttpRequest request, boolean streaming) {
+        private void dispatch(HttpRequest request, boolean streaming, AttemptListener.Cause cause) {
             if (isFinished()) {
                 return;
             }
-            int ordinal = dispatchCount;
-            boolean firstAttempt = ordinal == 0;
-            // 与状态码重试区分：仅流式中断后的首次非流式重发才是回退。
-            boolean fallback = !firstAttempt && !streaming && !snapshotStreaming();
+            int ordinal = statusRetries.get();
+            boolean firstAttempt = dispatchCount == 0;
             if (gate == null || !policy.enabled()) {
                 // 未接入站点调度、或本轮关闭重试：保留 #8 原行为。
-                beginDispatch(streaming);
-                attemptListener.onSendStart(firstAttempt);
+                beginDispatch();
+                attemptListener.onSendStart(firstAttempt, cause == AttemptListener.Cause.FALLBACK);
                 exchange(request, streaming);
                 return;
             }
             long wait = firstAttempt ? 0L : policy.retryDelayNanos();
             if (wait > 0L) {
-                notifyScheduled(AttemptListener.Stage.RETRY_WAIT, firstAttempt, ordinal, rateLimited, fallback);
+                notifyScheduled(AttemptListener.Stage.RETRY_WAIT, firstAttempt, ordinal, rateLimited, cause);
             }
             SendGate.Handle handle = gate.submit(siteId, wait, new SendGate.Send() {
                 @Override
@@ -393,8 +415,8 @@ public final class StreamingHttpTransport {
                     if (isFinished()) {
                         return;
                     }
-                    beginDispatch(streaming);
-                    attemptListener.onSendStart(firstAttempt);
+                    beginDispatch();
+                    attemptListener.onSendStart(firstAttempt, cause == AttemptListener.Cause.FALLBACK);
                     exchange(request, streaming);
                 }
 
@@ -403,7 +425,7 @@ public final class StreamingHttpTransport {
                     if (isFinished()) {
                         return;
                     }
-                    notifyScheduled(AttemptListener.Stage.SITE_QUEUE, firstAttempt, ordinal, false, fallback);
+                    notifyScheduled(AttemptListener.Stage.SITE_QUEUE, firstAttempt, ordinal, false, cause);
                 }
 
                 @Override
@@ -415,21 +437,15 @@ public final class StreamingHttpTransport {
             queueHandles.add(handle);
         }
 
-        private void beginDispatch(boolean streaming) {
+        private void beginDispatch() {
             dispatchCount++;
             rateLimited = false;
-            streamUsed = streaming;
-        }
-
-        /** 本轮最近一次提交的尝试是否为流式：用于区分回退与已经回退后的状态码重试。 */
-        private boolean snapshotStreaming() {
-            return streamUsed;
         }
 
         private void notifyScheduled(AttemptListener.Stage stage, boolean firstAttempt, int ordinal,
-                                     boolean limited, boolean fallback) {
+                                     boolean limited, AttemptListener.Cause cause) {
             try {
-                attemptListener.onScheduled(stage, firstAttempt, ordinal, limited, fallback);
+                attemptListener.onScheduled(stage, firstAttempt, ordinal, limited, cause);
             } catch (Throwable throwable) {
                 LOGGER.warn("请求等待通知抛出异常（已隔离）", throwable);
             }
@@ -471,9 +487,14 @@ public final class StreamingHttpTransport {
         }
 
         private void run(Attempt current, boolean streaming, long deadline) {
-            boolean streamPhase = streaming;
+            // 只有「已收到响应头、并确认按 SSE 读取」之后的失败才属于流中失败。
+            // 不能用 streaming 本身充当判据：流式请求返回普通 JSON 时响应头已经到达，
+            // 此后的解码失败与「响应头前断连」完全不同，不该被当成可重发的传输失败。
+            boolean streamPhase = false;
+            boolean headersReceived = false;
             try {
                 HttpResponse<InputStream> head = current.send.join();
+                headersReceived = true;
                 current.registerStream(head.body());
                 current.ensureActive();
                 int status = head.statusCode();
@@ -484,7 +505,7 @@ public final class StreamingHttpTransport {
                     return;
                 }
                 ContentKind kind = streaming ? contentKind(head.headers()) : ContentKind.JSON;
-                streamPhase = streaming;
+                streamPhase = streaming && kind == ContentKind.SSE;
                 String raw = kind == ContentKind.JSON
                         ? readAll(head.body(), deadline, current)
                         : readStream(head.body(), deadline, current);
@@ -501,10 +522,29 @@ public final class StreamingHttpTransport {
                 if (streamPhase && !(cause instanceof StreamServiceException)) {
                     // 流式阶段断开、超时或缺终止标志：唯一允许触发非流式回退的传输类失败。
                     fallback(cause);
+                } else if (isPreHeaderTransportFailure(cause, streaming, headersReceived)) {
+                    retryStreamingTransport(cause);
                 } else {
                     finish(null, cause);
                 }
             }
+        }
+
+        /**
+         * 是否为「响应头之前就断掉的传输失败」：流式请求连响应头都没拿到就失败。
+         * <p>
+         * 这种失败与是否流式无关（非流式同样连不上），因此值得保持流式重发一次；
+         * 取消不是失败，服务端在流里报的错（{@link StreamServiceException}）只可能出现在
+         * 已收到响应头之后，两者都排除在外。
+         * <p>
+         * 判定不能用 {@code cause instanceof ProtocolException}：单次尝试超时正是以
+         * {@code ProtocolException} 上报的，而超时恰恰是本路径最主要的场景。
+         */
+        private boolean isPreHeaderTransportFailure(Throwable cause, boolean streaming,
+                                                    boolean headersReceived) {
+            return streaming && !headersReceived
+                    && !(cause instanceof CancelledException)
+                    && !(cause instanceof StreamServiceException);
         }
 
         /** HTTP 错误状态码统一出口：限流冷却 → 状态码重试 → 非流式回退 → 原样交回。 */
@@ -530,12 +570,43 @@ public final class StreamingHttpTransport {
                 reserveRetry();
                 if (!isBudgetExpired() && statusRetries.get() <= policy.maxRetries()) {
                     // 保持当前模式重试：已经回退过就一直是非流式。
-                    attempt(streaming);
+                    attempt(streaming, AttemptListener.Cause.RETRY);
                     return;
                 }
             }
             finish(HttpStringResponse.of(head, errorBody, truncate(errorBody)), null);
         }
+
+        /**
+         * 响应头前断连出口：额度允许时保持流式重发一次，否则按开关状态收口。
+         * <p>
+         * 关闭重试时保留 #8 的断流回退行为：没有等待、没有提示，静默改用非流式重发，
+         * 与既有「关闭后不做重试」的语义一致（重发时机依赖站点闸门，闸门关闭后无处等待）。
+         * 额度耗尽后不回退：响应头前连断与 {@code stream} 无关，改用非流式同样连不上，
+         * 回退只增加一次计费风险与延迟，不提高成功率。
+         */
+        private void retryStreamingTransport(Throwable cause) {
+            if (isFinished()) {
+                return;
+            }
+            if (!policy.enabled()) {
+                // 关闭重试：保留 #8 行为，静默改用非流式重发一次。
+                fallback(cause);
+                return;
+            }
+            if (isBudgetExpired()) {
+                // 整轮预算已耗尽：再发一次只会立刻超时，直接按失败收口。
+                finish(null, cause);
+                return;
+            }
+            if (transportRetried.compareAndSet(false, true)) {
+                // 必须经由 attempt(...) 才能复用站点闸门：等待、冷却与排队提示都在那里。
+                attempt(true, AttemptListener.Cause.TRANSPORT_RETRY);
+                return;
+            }
+            finish(null, cause);
+        }
+
         /** 流式故障出口：额度允许时改用非流式重发一次，否则上报失败。 */
         private void fallback(Throwable cause) {
             if (isFinished()) {
@@ -544,7 +615,7 @@ public final class StreamingHttpTransport {
             if (!usedFallback) {
                 usedFallback = true;
                 emit(StreamEventType.FALLBACK, "");
-                attempt(false);
+                attempt(false, AttemptListener.Cause.FALLBACK);
                 return;
             }
             finish(null, cause);
