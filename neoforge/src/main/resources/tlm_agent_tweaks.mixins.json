@@ -12,8 +12,8 @@
     "HistoryAIChatScreenMixin",
     "AIChatScreenMixin",
     "LLMSiteEditorScreenMixin",
-    "ChatBubbleRendererMixin",
-    "WaitingChatBubbleRendererAccessor"
+    "client.ChatBubbleRendererMixin",
+    "client.WaitingChatBubbleRendererAccessor"
   ],
   "injectors": {
     "defaultRequire": 1
