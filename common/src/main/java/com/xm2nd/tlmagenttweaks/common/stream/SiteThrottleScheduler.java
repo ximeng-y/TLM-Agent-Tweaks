@@ -76,7 +76,9 @@ public final class SiteThrottleScheduler implements SendGate {
             if (request.readyAt <= now) {
                 site.queue.addLast(request);
             } else {
-                site.waiting.addLast(request);
+                // List 的 addLast 是 JDK 21 的 SequencedCollection 才有的方法，
+                // common 源码要同时被 Java 17 的 forge 薄壳编译，这里用 add
+                site.waiting.add(request);
             }
             actions = drain(site, now);
             schedule(site, now);

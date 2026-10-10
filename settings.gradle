@@ -1,9 +1,18 @@
 pluginManagement {
     repositories {
         maven { url = 'https://maven.neoforged.net/releases' }
+        maven { url = 'https://maven.minecraftforge.net/' }
         maven { url = 'https://repo.spongepowered.org/repository/maven-public/' }
         gradlePluginPortal()
         mavenCentral()
+    }
+    // org.spongepowered.mixin 的插件标记只有 SNAPSHOT 通道提供，需显式声明快照解析
+    resolutionStrategy {
+        eachPlugin {
+            if (requested.id.id == 'org.spongepowered.mixin') {
+                useModule('org.spongepowered:mixingradle:0.7-SNAPSHOT')
+            }
+        }
     }
 }
 
@@ -12,6 +21,6 @@ plugins {
 }
 
 rootProject.name = 'TLM-Agent-Tweaks'
-// Chunk-Plan 式单分支混合工程：common（纯 Java 引擎）+ 加载器薄壳
-// 当前仅 neoforge（1.21.1）；后续 Forge 1.20.1 迁移时新增 forge 薄壳子项目
-include 'common', 'neoforge'
+// Chunk-Plan 式单分支混合工程：common（纯 Java 引擎）+ 各加载器薄壳
+// neoforge（1.21.1，Java 21）+ forge（1.20.1，Java 17）
+include 'common', 'neoforge', 'forge'

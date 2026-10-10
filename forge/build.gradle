@@ -1,0 +1,135 @@
+// forge：Minecraft Forge 1.20.1 薄壳（ForgeGradle 6 + 官方 mojmap，与 neoforge 代码对齐）
+// 1.20.1 官方 Java 要求为 17（非 21），故 toolchain 与其余模块分离；
+// common 源码同样并入本模块 sourceSet 编译（不用 project 依赖：common jar 由 JDK 21 产出，
+// class 文件版本 65 无法被 Java 17 运行时读取）。
+
+plugins {
+    id 'java'
+    id 'net.minecraftforge.gradle' version "${forge_gradle_version}"
+    // ForgeGradle 6 自身不提供 mixin 扩展：refmap 生成与随包打包由 MixinGradle 负责
+    // （与 TLM 本体、Self-Talk 的 Forge 侧同一套做法）
+    id 'org.spongepowered.mixin' version '0.7.+'
+}
+
+base {
+    archivesName = "tlm-agent-tweaks-${mod_version}-forge-${forge_minecraft_version}"
+}
+
+// 产物名已含版本号，置空 version 避免追加尾部后缀
+version = ''
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of("${forge_java_version}" as int)
+}
+
+minecraft {
+    // 官方 mojmap（与 neoforge 一致，类名/方法名对齐，便于两处镜像同步）
+    mappings channel: 'official', version: "${forge_minecraft_version}"
+
+    runs {
+        server {
+            workingDirectory project.file('run/server')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'info'
+            // mixin refmap 在 dev 运行时的重映射（refmap 内是生产 SRG 名）
+            property 'mixin.env.remapRefMap', 'true'
+            property 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
+            args '--nogui'
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
+        client {
+            workingDirectory project.file('run/client')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'info'
+            property 'mixin.env.remapRefMap', 'true'
+            property 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
+    }
+}
+
+// mixin 注解处理器：生成 refmap（Forge 1.20.1 运行时是 SRG 名，必须重映射）
+mixin {
+    add sourceSets.main, "${mod_id}.refmap.json"
+    config "${mod_id}.mixins.json"
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${forge_minecraft_version}-${forge_version}"
+
+    // 车万女仆本体：Modrinth maven，1.20.1 发布物是 SRG 名，必须 fg.deobf
+    implementation fg.deobf("maven.modrinth:touhou-little-maid:${tlm_version_forge}")
+
+    // Cloth Config：编译期引用（运行时由 TLM 的前置保证存在）；dev 运行时也装载以便测试配置页
+    compileOnly fg.deobf("maven.modrinth:cloth-config:${cloth_config_version_forge}")
+
+    annotationProcessor "org.spongepowered:mixin:${mixin_version}:processor"
+
+    testImplementation platform("org.junit:junit-bom:${junit_version}")
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.slf4j:slf4j-nop:2.0.13'
+}
+
+// common 引擎源码直接并入本模块编译（与 neoforge 一致）：发布 jar 直接包含 common 类
+sourceSets {
+    main {
+        java.srcDir project(':common').sourceSets.main.java.srcDirs
+    }
+    test {
+        // 两侧测试完全一致（引擎测试 + 协议 codec 测试），并入同一份源码而非各存一份，
+        // 避免 JDK 21 / JDK 17 与 1.21.1 / 1.20.1 的 API 差异把两份拷成不同内容而悄悄漂移
+        java.srcDir project(':neoforge').file('src/test/java')
+    }
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    // 只从 neoforge 取 assets（lang 等文案，避免 91 条文案在两处各存一份而漂移）。
+    // 不用 resources.srcDir + exclude：exclude 作用于整个 sourceSet，
+    // 会连同 forge 自己的 mods.toml / mixins.json / pack.mcmeta 一起排除掉。
+    with copySpec {
+        from(project(':neoforge').file('src/main/resources')) {
+            include 'assets/**'
+        }
+    }
+    def replaceProperties = [
+            mod_id          : "${mod_id}",
+            mod_name        : "${mod_name}",
+            mod_version     : "${mod_version}",
+            mod_authors     : "${mod_authors}",
+            minecraft_version_range: "${forge_minecraft_version_range}",
+            tlm_version_range      : "${tlm_version_range}",
+    ]
+    inputs.properties replaceProperties
+    filesMatching('META-INF/mods.toml') {
+        expand replaceProperties
+    }
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
+}
+
+// TLM 同款：防 refmap 偶发丢失
+tasks.compileJava {
+    outputs.upToDateWhen { false }
+}
+
+// Forge 1.20.1 从 jar manifest 的 MixinConfigs 读取 mixin 配置
+// （mods.toml 没有 [[mixins]] 段，TLM 本体同样只用 manifest）
+tasks.named('jar', Jar).configure {
+    manifest {
+        attributes 'MixinConfigs': "${mod_id}.mixins.json"
+    }
+}
