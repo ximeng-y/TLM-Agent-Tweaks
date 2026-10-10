@@ -86,10 +86,13 @@ final class RetryNotifier implements StreamingHttpTransport.AttemptListener {
     @Override
     public void onSendStart(boolean firstAttempt, boolean fallback) {
         if (fallback) {
-            // 非流式回退真正发出：明确当前模式与「已发出、等待响应」，
-            // 避免整段重发期间看起来仍停在等待重试。
+            // 非流式回退真正发出：停播流式残片；开启重试时同时把气泡改为「已改用普通模式
+            // 发送」，避免整段重发看起来仍停在等待重试上。关闭重试时这条回退是 #8 的静默
+            // 行为，不得凭空多出气泡文案。
             ThinkingDisplayService.onNativeStage(callback, displayHandle, true);
-            show(RetryBubble.fallbackSent());
+            if (policy.enabled()) {
+                show(RetryBubble.fallbackSent());
+            }
             return;
         }
         // 流式重试真正发出时重新从空窗口开始播放思考；不会重播中断流残片。

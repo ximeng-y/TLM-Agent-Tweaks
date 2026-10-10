@@ -84,7 +84,7 @@
   "chat.tlm_agent_tweaks.retry.rate_limited": "Too many requests, retrying in %s s (attempt %s/%s)",
   "chat.tlm_agent_tweaks.retry.fallback": "Stream interrupted, retrying without streaming…",
   "chat.tlm_agent_tweaks.retry.fallback.sent": "Sent without streaming, waiting for the response…",
-  "chat.tlm_agent_tweaks.retry.transport": "Stream connection lost, resending the streaming request in %s s…",
+  "chat.tlm_agent_tweaks.retry.transport": "No stream response yet, resending the streaming request in %s s…",
   "chat.tlm_agent_tweaks.retry.site_queue": "Site is busy, queued for sending (retried %s/%s)",
   "chat.tlm_agent_tweaks.retry.site_queue.first": "Site is busy, queued for sending…",
 
@@ -98,5 +98,5 @@
   "config.tlm_agent_tweaks.record_summary": "Count summary requests in stats",
   "config.tlm_agent_tweaks.record_summary.tooltip": "History compression summary requests also consume tokens; they are counted by default",
   "config.tlm_agent_tweaks.retry_enabled": "Enable automatic request retry",
-  "config.tlm_agent_tweaks.retry_enabled.tooltip": "When enabled, 429 and 500/502/503/504 are retried up to 2 extra times with a fixed 5 s wait each (Retry-After is ignored); a streaming request that disconnects before its response headers is resent as a streaming request once; requests arriving during a site cooldown are queued and sent later. When disabled, no retry or site cooldown is applied, but falling back to a non-streaming resend after a stream interruption is unaffected"
+  "config.tlm_agent_tweaks.retry_enabled.tooltip": "When enabled, 429 and 500/502/503/504 are retried up to 2 extra times with a fixed 5 s wait each (Retry-After is ignored); a streaming request that fails before its response headers is resent as a streaming request once, and after that budget is spent still falls back to a non-streaming resend once; requests arriving during a site cooldown are queued and sent later. When disabled, no retry or site cooldown is applied and no retry/fallback bubble text is shown, but falling back to a non-streaming resend after a stream interruption is unaffected"
 }

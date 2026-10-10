@@ -44,16 +44,15 @@ import java.util.concurrent.atomic.AtomicReference;
  * 一个 {@link Session} 对应一次逻辑模型请求，其内部至多发生
  * {@code 1 + 1 + maxRetries + 1} 次实际 HTTP 尝试，三条路径各自计数、互不占用对方额度：
  * <ul>
- *   <li><b>传输重试</b>：流式请求在**收到响应头之前**断连（连接刚建立就断开、网关闪断）时，
- *       用同一份冻结请求体保持 {@code stream:true} 重发一次。响应头前断连与是否流式无关，
- *       改用非流式同样连不上，因此这条路径不回退；它受 {@code retry.enabled} 控制，
- *       关闭时保留 #8 的断流回退行为；</li>
+ *   <li><b>传输重试</b>：流式请求在**收到响应头之前**失败（连接刚建立就断开、网关闪断、
+ *       单次尝试超时）时，用同一份冻结请求体保持 {@code stream:true} 重发一次。
+ *       这条路径受 {@code retry.enabled} 控制，关闭时不重发、直接落到非流式回退；</li>
  *   <li><b>状态码重试</b>：429 / 500 / 502 / 503 / 504，最多 {@code maxRetries} 次，
  *       每次固定等待 {@code retryDelay}（忽略 {@code Retry-After}，不做指数退避与抖动）；</li>
- *   <li><b>非流式回退</b>：仅在服务端明确不支持 {@code stream}/{@code stream_options}，
- *       或流式读取中途失败（已收到响应头、SSE 中断/超时/缺终止标志、分片聚合失败）时
- *       发生一次；此后所有尝试都保持 {@code stream:false}；</li>
- *   <li>传输重试额度耗尽后不再回退，直接上报失败；状态码重试额度耗尽后，最后一次的错误
+ *   <li><b>非流式回退</b>：服务端明确不支持 {@code stream}/{@code stream_options}、
+ *       流式读取中途失败（已收到响应头、SSE 中断/超时/缺终止标志、分片聚合失败），
+ *       或响应头前失败且传输重试额度已用尽时，发生一次；此后所有尝试都保持 {@code stream:false}；</li>
+ *   <li>整轮预算已耗尽时直接失败，不再消耗任何额度；状态码重试额度耗尽后，最后一次的错误
  *       响应（状态码 + 截断后的正文）原样交回调用方。</li>
  * </ul>
  * 冻结请求体只解一次，全部尝试复用同一份正文、模型、消息、工具结果与鉴权头；
@@ -275,7 +274,8 @@ public final class StreamingHttpTransport {
          * @param firstAttempt 是否为整轮请求的第一次发送（首次发送不等待）
          * @param retryOrdinal 已消耗的状态码重试次数（1 起；站点排队场景为 0）
          * @param rateLimited  上一次尝试是否因 429 被限流（状态而非起因，不能并入 {@code cause}）
-         * @param cause        本次尝试的起因；三类等待共用同一条调度时间线，仅提示文案不同
+         * @param cause        本次尝试的起因；首次发送为 {@code null}（此时只可能出现站点排队提示）。
+         *                     关闭重试时的静默回退不走本方法，因此不会在这里产生任何提示
          */
         void onScheduled(Stage stage, boolean firstAttempt, int retryOrdinal, boolean rateLimited,
                          Cause cause);
@@ -299,7 +299,7 @@ public final class StreamingHttpTransport {
         enum Cause {
             /** 状态码重试（429 / 5xx）：保持当前模式重发。 */
             RETRY,
-            /** 响应头前断连：保持流式重发。 */
+            /** 响应头前失败：保持流式重发。 */
             TRANSPORT_RETRY,
             /** 流式读取中途失败：改用非流式重发。 */
             FALLBACK
@@ -401,7 +401,7 @@ public final class StreamingHttpTransport {
             if (gate == null || !policy.enabled()) {
                 // 未接入站点调度、或本轮关闭重试：保留 #8 原行为。
                 beginDispatch();
-                attemptListener.onSendStart(firstAttempt, cause == AttemptListener.Cause.FALLBACK);
+                attemptListener.onSendStart(firstAttempt, !streaming);
                 exchange(request, streaming);
                 return;
             }
@@ -416,7 +416,7 @@ public final class StreamingHttpTransport {
                         return;
                     }
                     beginDispatch();
-                    attemptListener.onSendStart(firstAttempt, cause == AttemptListener.Cause.FALLBACK);
+                    attemptListener.onSendStart(firstAttempt, !streaming);
                     exchange(request, streaming);
                 }
 
@@ -457,8 +457,6 @@ public final class StreamingHttpTransport {
                 return;
             }
             Attempt current = new Attempt();
-            current.request = request;
-            current.retryOnTransportFailure = streaming;
             activeAttempt.set(current);
             long deadline = System.nanoTime() + attemptTimeout().toNanos();
             try {
@@ -473,10 +471,18 @@ public final class StreamingHttpTransport {
                             current.registerStream(head.body());
                         }
                     });
+                    // 截止计时器是在途尝试的超时出口：它只把超时记在本次尝试上，
+                    // 不在这里判成败——真正的收口统一发生在读取线程捕获到失败之后。
                     current.guard = DEADLINE.schedule(() -> {
-                        ProtocolException failure = new ProtocolException(
+                        ProtocolException timeout = new ProtocolException(
                                 "LLM request phase exceeded deadline " + attemptTimeout());
-                        current.finish(null, failure);
+                        synchronized (current) {
+                            if (current.finished) {
+                                return;
+                            }
+                            current.timedOut = true;
+                        }
+                        current.abort(timeout);
                     }, Math.max(1L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
                 }
             } catch (Throwable error) {
@@ -499,7 +505,6 @@ public final class StreamingHttpTransport {
                 current.ensureActive();
                 int status = head.statusCode();
                 if (!isSuccessful(status)) {
-                    current.retryOnTransportFailure = false;
                     String errorBody = readAll(head.body(), deadline, current);
                     onErrorStatus(current, streaming, head, errorBody);
                     return;
@@ -517,12 +522,12 @@ public final class StreamingHttpTransport {
                 current.finish(response, null);
                 finish(response, null);
             } catch (Throwable throwable) {
-                Throwable cause = unwrap(throwable);
+                Throwable cause = current.reason(unwrap(throwable));
                 current.finish(null, cause);
                 if (streamPhase && !(cause instanceof StreamServiceException)) {
                     // 流式阶段断开、超时或缺终止标志：唯一允许触发非流式回退的传输类失败。
-                    fallback(cause);
-                } else if (isPreHeaderTransportFailure(cause, streaming, headersReceived)) {
+                    fallback(AttemptListener.Cause.FALLBACK, cause);
+                } else if (isPreHeaderTransportFailure(current, cause, streaming, headersReceived)) {
                     retryStreamingTransport(cause);
                 } else {
                     finish(null, cause);
@@ -531,20 +536,30 @@ public final class StreamingHttpTransport {
         }
 
         /**
-         * 是否为「响应头之前就断掉的传输失败」：流式请求连响应头都没拿到就失败。
+         * 是否为「响应头之前就失败的传输失败」：流式请求连响应头都没拿到就失败。
          * <p>
-         * 这种失败与是否流式无关（非流式同样连不上），因此值得保持流式重发一次；
-         * 取消不是失败，服务端在流里报的错（{@link StreamServiceException}）只可能出现在
-         * 已收到响应头之后，两者都排除在外。
-         * <p>
-         * 判定不能用 {@code cause instanceof ProtocolException}：单次尝试超时正是以
-         * {@code ProtocolException} 上报的，而超时恰恰是本路径最主要的场景。
+         * 判定不依赖异常类型，而是看**本次尝试自身**记录的事实：
+         * <ul>
+         *   <li>是否已经拿到响应头——没有才是响应头前失败；</li>
+         *   <li>{@link Attempt#timedOut}——截止计时器作废在途尝试时，会取消 {@code sendAsync}，
+         *       {@code send.join()} 随之抛出没有语义的 {@link CancellationException}，
+         *       原始超时原因被顶替。只看异常类型会把最常见的一种情形（服务端在响应头前挂起
+         *       直到超时）误判成「调用方取消」而放弃重发；</li>
+         *   <li>是否由本方法之外主动取消——调用方取消与资源释放走 {@link #cancel()}，
+         *       它们不是失败，不许重发。</li>
+         * </ul>
+         * 这张表必须按此顺序判定：截止计时器会用取消来终止连接，因此超时必然伴随
+         * {@link CancelledException}，超时标记必须先于取消判定生效。
          */
-        private boolean isPreHeaderTransportFailure(Throwable cause, boolean streaming,
+        private boolean isPreHeaderTransportFailure(Attempt current, Throwable cause, boolean streaming,
                                                     boolean headersReceived) {
-            return streaming && !headersReceived
-                    && !(cause instanceof CancelledException)
-                    && !(cause instanceof StreamServiceException);
+            if (!streaming || headersReceived || cause instanceof StreamServiceException) {
+                return false;
+            }
+            if (current.timedOut) {
+                return true;
+            }
+            return !(cause instanceof CancelledException) && !cancelled.get() && !terminal.get();
         }
 
         /** HTTP 错误状态码统一出口：限流冷却 → 状态码重试 → 非流式回退 → 原样交回。 */
@@ -563,7 +578,7 @@ public final class StreamingHttpTransport {
                 return;
             }
             if (streaming && shouldRetryWithoutStream(status, errorBody)) {
-                fallback(new StreamUnsupportedException(status, errorBody));
+                fallback(AttemptListener.Cause.FALLBACK, new StreamUnsupportedException(status, errorBody));
                 return;
             }
             if (policy.enabled() && isRetryableStatus(status)) {
@@ -578,20 +593,18 @@ public final class StreamingHttpTransport {
         }
 
         /**
-         * 响应头前断连出口：额度允许时保持流式重发一次，否则按开关状态收口。
+         * 响应头前失败出口：额度允许时保持流式重发一次，否则改用非流式回退。
          * <p>
-         * 关闭重试时保留 #8 的断流回退行为：没有等待、没有提示，静默改用非流式重发，
-         * 与既有「关闭后不做重试」的语义一致（重发时机依赖站点闸门，闸门关闭后无处等待）。
-         * 额度耗尽后不回退：响应头前连断与 {@code stream} 无关，改用非流式同样连不上，
-         * 回退只增加一次计费风险与延迟，不提高成功率。
+         * 额度用尽后仍然回退一次：已建立连接、服务端只是不对流式请求回响应
+         * （流式端点挂起、网关对 SSE 挂起）同样落在本路径，此时普通请求常常是通的，
+         * 回退能拿回一个成功响应；只有真正连不上（连接被拒、RST）时那次回退才纯属浪费，
+         * 代价与实际收益相抵。
+         * <p>
+         * 关闭重试时保持 #8 行为：没有等待、没有提示，静默改用非流式重发一次
+         * （重发时机依赖站点闸门，闸门关闭后无处等待，故不引入新的气泡文案）。
          */
         private void retryStreamingTransport(Throwable cause) {
             if (isFinished()) {
-                return;
-            }
-            if (!policy.enabled()) {
-                // 关闭重试：保留 #8 行为，静默改用非流式重发一次。
-                fallback(cause);
                 return;
             }
             if (isBudgetExpired()) {
@@ -599,26 +612,34 @@ public final class StreamingHttpTransport {
                 finish(null, cause);
                 return;
             }
+            if (!policy.enabled()) {
+                fallback(null, cause);
+                return;
+            }
             if (transportRetried.compareAndSet(false, true)) {
                 // 必须经由 attempt(...) 才能复用站点闸门：等待、冷却与排队提示都在那里。
                 attempt(true, AttemptListener.Cause.TRANSPORT_RETRY);
                 return;
             }
-            finish(null, cause);
+            fallback(AttemptListener.Cause.FALLBACK, cause);
         }
 
-        /** 流式故障出口：额度允许时改用非流式重发一次，否则上报失败。 */
-        private void fallback(Throwable cause) {
+        /**
+         * 流式故障出口：额度允许时改用非流式重发一次，否则上报失败。
+         *
+         * @param cause 本次重发的起因；{@code null} 表示静默重发（关闭重试时）不作任何提示
+         */
+        private void fallback(AttemptListener.Cause cause, Throwable failure) {
             if (isFinished()) {
                 return;
             }
             if (!usedFallback) {
                 usedFallback = true;
                 emit(StreamEventType.FALLBACK, "");
-                attempt(false, AttemptListener.Cause.FALLBACK);
+                attempt(false, cause);
                 return;
             }
-            finish(null, cause);
+            finish(null, failure);
         }
 
         private void cancel() {
@@ -827,9 +848,11 @@ public final class StreamingHttpTransport {
             private CompletableFuture<HttpResponse<InputStream>> send;
             private InputStream stream;
             private ScheduledFuture<?> guard;
-            private HttpRequest request;
             private boolean finished;
-            private volatile boolean retryOnTransportFailure;
+            /** 本次尝试是否被截止计时器作废：判定响应头前失败时不能只看异常类型，见其调用点。 */
+            private volatile boolean timedOut;
+            /** 截止计时器给出的原始失败原因；作废会以取消连接的方式来电，原因必须显式留存。 */
+            private Throwable failure;
 
             synchronized void ensureActive() {
                 if (finished || cancelled.get()) {
@@ -845,7 +868,31 @@ public final class StreamingHttpTransport {
                 }
             }
 
-            void finish(HttpResponse<String> response, Throwable failure) {
+            /**
+             * 作废在途尝试但**不**宣布终态：截止计时器让读取线程自己去收口，
+             * 因此延迟的读取结果不会丢失，失败原因也仍由读取线程唯一地决定。
+             */
+            synchronized void abort(Throwable cause) {
+                if (finished) {
+                    return;
+                }
+                failure = cause;
+                if (guard != null) {
+                    guard.cancel(false);
+                }
+                closeQuietly(stream);
+                stream = null;
+                if (send != null && !send.isDone()) {
+                    send.cancel(true);
+                }
+            }
+
+            /** 对外可见的失败原因：截止计时器留存的原因优先于被顶替的取消异常。 */
+            synchronized Throwable reason(Throwable fallbackCause) {
+                return failure != null ? failure : fallbackCause;
+            }
+
+            void finish(HttpResponse<String> response, Throwable cause) {
                 synchronized (this) {
                     if (finished) {
                         return;
@@ -861,10 +908,10 @@ public final class StreamingHttpTransport {
                     stream = null;
                 }
                 activeAttempt.compareAndSet(this, null);
-                if (failure == null) {
+                if (cause == null) {
                     future.complete(response);
                 } else {
-                    future.completeExceptionally(failure);
+                    future.completeExceptionally(cause);
                 }
             }
         }

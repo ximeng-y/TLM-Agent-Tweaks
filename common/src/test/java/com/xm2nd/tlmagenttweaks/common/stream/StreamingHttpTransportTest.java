@@ -35,6 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 class StreamingHttpTransportTest {
 
@@ -141,7 +142,8 @@ class StreamingHttpTransportTest {
     }
 
     @Test
-    void repeatedPreHeaderTransportFailureFailsWithoutFallback() throws Exception {
+    void repeatedPreHeaderTransportFailureFallsBackThenSucceeds() throws Exception {
+        // 额度耗尽后仍回退一次：服务端不响应流式请求、但普通请求正常时只有回退能拿回响应。
         server.createContext("/header-reset-twice", exchange -> {
             String body = readBody(exchange);
             if (isStreamingRequest(body)) {
@@ -153,19 +155,94 @@ class StreamingHttpTransportTest {
             chatJson(exchange, false);
         });
         AtomicInteger transportRetried = new AtomicInteger();
-        ExecutionException error = assertThrows(ExecutionException.class, () ->
-                runWithRetry("/header-reset-twice", enabledPolicy(), new CopyOnWriteArrayList<>(),
-                        new CopyOnWriteArrayList<>(), transportRetried));
-        assertNotNull(error.getCause());
-        // 传输重试额度只有一次：第二次仍然断连就直接失败，不再改用非流式。
+        List<StreamEventType> events = new CopyOnWriteArrayList<>();
+        List<TransportNotice> notices = new CopyOnWriteArrayList<>();
+        List<Boolean> sendStarts = new CopyOnWriteArrayList<>();
+        HttpResponse<String> response = runWithRetry("/header-reset-twice", enabledPolicy(), events,
+                notices, sendStarts, transportRetried);
+        assertEquals(200, response.statusCode());
+        // 一次流式 + 一次流式重发 + 一次非流式回退：回退不占传输重试额度。
         assertEquals(2, streamCalls.get());
-        assertEquals(0, nonStreamCalls.get());
+        assertEquals(1, nonStreamCalls.get());
         assertEquals(1, transportRetried.get());
+        // 回退起因是额度耗尽的传输重试，不是流中失败。
+        assertEquals(StreamingHttpTransport.AttemptListener.Cause.FALLBACK,
+                notices.get(notices.size() - 1).cause());
+        assertEquals(List.of(false, false, true), sendStarts);
+    }
+
+    @Test
+    void timeoutBeforeHeadersRetriesTransportThenFallsBack() throws Exception {
+        // 生产形状：TLM 写死 60s 请求超时，与单次尝试超时恒等，因此在响应头前挂起的服务端
+        // 总是先由截止计时器作废连接，send.join() 随之抛出被顶替的取消异常。
+        // 超时必须仍然算响应头前失败：先保持流式重发一次，额度用尽后回退非流式。
+        var executor = java.util.concurrent.Executors.newCachedThreadPool();
+        HttpServer hanging = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        hanging.setExecutor(executor);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger streamAttempts = new AtomicInteger();
+        AtomicInteger nonStreamAttempts = new AtomicInteger();
+        hanging.createContext("/", exchange -> {
+            String body = readBody(exchange);
+            if (!isStreamingRequest(body)) {
+                nonStreamAttempts.incrementAndGet();
+                chatJson(exchange, false);
+                return;
+            }
+            streamAttempts.incrementAndGet();
+            // 响应头之前一直挂着：客户端只能靠自己的超时/截止计时器脱身。
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            }
+            exchange.close();
+        });
+        hanging.start();
+        try {
+            SiteThrottleScheduler gate = new SiteThrottleScheduler(Duration.ofMillis(10), Duration.ofMillis(10));
+            StreamingHttpTransport transport = new StreamingHttpTransport(Duration.ofMillis(300), gate);
+            List<TransportNotice> notices = new CopyOnWriteArrayList<>();
+            HttpRequest request = HttpRequest.newBuilder(URI.create(
+                            "http://127.0.0.1:" + hanging.getAddress().getPort() + "/"))
+                    .timeout(Duration.ofMillis(300))
+                    .POST(HttpRequest.BodyPublishers.ofString(chatRequestBody())).build();
+            StreamingHttpTransport.Call call = transport.prepare(client(),
+                    StreamingHttpTransport.freeze(request), SiteProtocol.CHAT_COMPLETIONS, null,
+                    "timeout-site", null, enabledPolicy(), new StreamingHttpTransport.AttemptListener() {
+                        @Override
+                        public void onScheduled(StreamingHttpTransport.AttemptListener.Stage stage,
+                                                boolean firstAttempt, int retryOrdinal, boolean rateLimited,
+                                                StreamingHttpTransport.AttemptListener.Cause cause) {
+                            notices.add(new TransportNotice(cause, retryOrdinal));
+                        }
+
+                        @Override
+                        public void onSendStart(boolean firstAttempt, boolean fallback) {
+                        }
+                    });
+            call.start();
+            HttpResponse<String> response = call.future().get(10, TimeUnit.SECONDS);
+            // 服务端只对普通请求回响应：回退是唯一能拿回成功响应的路径。
+            assertEquals(200, response.statusCode());
+            assertEquals(2, streamAttempts.get());
+            assertEquals(1, nonStreamAttempts.get());
+            assertTrue(call.session().transportRetried(), "截止计时器作废的尝试应当仍然触发传输重试");
+            assertEquals(2, notices.size());
+            assertEquals(StreamingHttpTransport.AttemptListener.Cause.TRANSPORT_RETRY, notices.get(0).cause());
+            assertEquals(StreamingHttpTransport.AttemptListener.Cause.FALLBACK, notices.get(1).cause());
+            gate.discardAll();
+        } finally {
+            release.countDown();
+            hanging.stop(0);
+            executor.shutdownNow();
+        }
     }
 
     @Test
     void preHeaderTransportFailureFallsBackWhenRetryDisabled() throws Exception {
         // 关闭重试时保留 #8 行为：没有等待与提示，静默改用非流式重发一次。
+        // 必须经站点闸门路径验证：关闭重试后仍会交给 RetryNotifier 的 DISABLED 策略。
         server.createContext("/header-reset-disabled", exchange -> {
             String body = readBody(exchange);
             if (isStreamingRequest(body)) {
@@ -176,12 +253,33 @@ class StreamingHttpTransportTest {
             nonStreamCalls.incrementAndGet();
             chatJson(exchange, false);
         });
-        HttpResponse<String> response = new StreamingHttpTransport().send(client(),
+        SiteThrottleScheduler gate = new SiteThrottleScheduler(Duration.ofSeconds(5), Duration.ofSeconds(5));
+        List<Boolean> sendStarts = new CopyOnWriteArrayList<>();
+        StreamingHttpTransport transport = new StreamingHttpTransport(null, gate);
+        StreamingHttpTransport.Call call = transport.prepare(client(),
                 StreamingHttpTransport.freeze(request("/header-reset-disabled")),
-                SiteProtocol.CHAT_COMPLETIONS, null).get(5, TimeUnit.SECONDS);
+                SiteProtocol.CHAT_COMPLETIONS, null, "test-site", null,
+                RequestRetryPolicy.DISABLED, new StreamingHttpTransport.AttemptListener() {
+                    @Override
+                    public void onScheduled(StreamingHttpTransport.AttemptListener.Stage stage,
+                                            boolean firstAttempt, int retryOrdinal, boolean rateLimited,
+                                            StreamingHttpTransport.AttemptListener.Cause cause) {
+                        fail("关闭重试时不得产生任何等待提示");
+                    }
+
+                    @Override
+                    public void onSendStart(boolean firstAttempt, boolean fallback) {
+                        sendStarts.add(fallback);
+                    }
+                });
+        call.start();
+        HttpResponse<String> response = call.future().get(5, TimeUnit.SECONDS);
         assertEquals(200, response.statusCode());
         assertEquals(1, streamCalls.get());
         assertEquals(1, nonStreamCalls.get());
+        // 回退是静默的，但「真正发出的是非流式」仍须照实上报：展示层据此不发思考残片。
+        assertEquals(List.of(false, true), sendStarts);
+        gate.discardAll();
     }
 
     @Test
