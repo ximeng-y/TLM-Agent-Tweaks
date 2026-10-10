@@ -496,6 +496,7 @@ public final class StreamingHttpTransport {
             // 两个事实互相独立，不能用一个布尔量代替：
             //   bodyPhase 已收到响应头——此前的失败走传输重发，之后的失败走非流式回退；
             //   bodyRead  正文已完整取回——此后的失败只剩解码，属于协议问题，不重发也不回退。
+            // 「完整取回」不含零字节正文：那种情况下面根本没有可解码的协议内容。
             // 判据刻意不看响应头声明的内容类型：流式端点返回 application/json 时正文同样可能
             // 读到一半卡死，那是传输失败，与「完整取回但解码失败」是两回事。
             boolean bodyPhase = false;
@@ -515,6 +516,11 @@ public final class StreamingHttpTransport {
                 String raw = kind == ContentKind.JSON
                         ? readAll(head.body(), deadline, current)
                         : readStream(head.body(), deadline, current);
+                if (kind == ContentKind.JSON && raw.isEmpty()) {
+                    // 零字节正文不能算完整取回：Content-Length 缺失或被代理改写成 0、网关在
+                    // 上游失败时回 200 空体都会走到这里，与「正文读到一半断开」是同一类失败。
+                    throw new IOException("Response headers received but body is empty");
+                }
                 bodyRead = true;
                 current.ensureActive();
                 JsonObject aggregated = JsonParser.parseString(raw).getAsJsonObject();
