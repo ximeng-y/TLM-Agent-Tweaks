@@ -493,14 +493,16 @@ public final class StreamingHttpTransport {
         }
 
         private void run(Attempt current, boolean streaming, long deadline) {
-            // 只有「已收到响应头、并确认按 SSE 读取」之后的失败才属于流中失败。
-            // 不能用 streaming 本身充当判据：流式请求返回普通 JSON 时响应头已经到达，
-            // 此后的解码失败与「响应头前断连」完全不同，不该被当成可重发的传输失败。
-            boolean streamPhase = false;
-            boolean headersReceived = false;
+            // 两个事实互相独立，不能用一个布尔量代替：
+            //   bodyPhase 已收到响应头——此前的失败走传输重发，之后的失败走非流式回退；
+            //   bodyRead  正文已完整取回——此后的失败只剩解码，属于协议问题，不重发也不回退。
+            // 判据刻意不看响应头声明的内容类型：流式端点返回 application/json 时正文同样可能
+            // 读到一半卡死，那是传输失败，与「完整取回但解码失败」是两回事。
+            boolean bodyPhase = false;
+            boolean bodyRead = false;
             try {
                 HttpResponse<InputStream> head = current.send.join();
-                headersReceived = true;
+                bodyPhase = true;
                 current.registerStream(head.body());
                 current.ensureActive();
                 int status = head.statusCode();
@@ -510,10 +512,10 @@ public final class StreamingHttpTransport {
                     return;
                 }
                 ContentKind kind = streaming ? contentKind(head.headers()) : ContentKind.JSON;
-                streamPhase = streaming && kind == ContentKind.SSE;
                 String raw = kind == ContentKind.JSON
                         ? readAll(head.body(), deadline, current)
                         : readStream(head.body(), deadline, current);
+                bodyRead = true;
                 current.ensureActive();
                 JsonObject aggregated = JsonParser.parseString(raw).getAsJsonObject();
                 // 三协议都必须完整解码成功后才交给 TLM；不能把聚合错误留到重试范围之外。
@@ -524,10 +526,11 @@ public final class StreamingHttpTransport {
             } catch (Throwable throwable) {
                 Throwable cause = current.reason(unwrap(throwable));
                 current.finish(null, cause);
-                if (streamPhase && !(cause instanceof StreamServiceException)) {
-                    // 流式阶段断开、超时或缺终止标志：唯一允许触发非流式回退的传输类失败。
+                if (bodyPhase && !bodyRead && !(cause instanceof StreamServiceException)) {
+                    // 响应头已到、正文没读完：连接中断、读 body 超时、缺少终止标志或分片聚合
+                    // 失败，都是传输类失败，允许一次非流式回退。
                     fallback(AttemptListener.Cause.FALLBACK, cause);
-                } else if (isPreHeaderTransportFailure(current, cause, streaming, headersReceived)) {
+                } else if (isPreHeaderTransportFailure(current, cause, streaming, bodyPhase)) {
                     retryStreamingTransport(cause);
                 } else {
                     finish(null, cause);
@@ -552,8 +555,8 @@ public final class StreamingHttpTransport {
          * {@link CancelledException}，超时标记必须先于取消判定生效。
          */
         private boolean isPreHeaderTransportFailure(Attempt current, Throwable cause, boolean streaming,
-                                                    boolean headersReceived) {
-            if (!streaming || headersReceived || cause instanceof StreamServiceException) {
+                                                    boolean bodyPhase) {
+            if (!streaming || bodyPhase || cause instanceof StreamServiceException) {
                 return false;
             }
             if (current.timedOut) {
@@ -851,7 +854,7 @@ public final class StreamingHttpTransport {
             private boolean finished;
             /** 本次尝试是否被截止计时器作废：判定响应头前失败时不能只看异常类型，见其调用点。 */
             private volatile boolean timedOut;
-            /** 截止计时器给出的原始失败原因；作废会以取消连接的方式来电，原因必须显式留存。 */
+            /** 截止计时器给出的原始失败原因；作废以取消连接的方式终止，原因必须显式留存。 */
             private Throwable failure;
 
             synchronized void ensureActive() {

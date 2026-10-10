@@ -240,6 +240,77 @@ class StreamingHttpTransportTest {
     }
 
     @Test
+    void stalledPlainJsonBodyStillFallsBackToNonStream() throws Exception {
+        // 响应头已到、Content-Type 是 application/json，但正文写到一半就停住：
+        // 这是传输失败而不是协议错误，必须仍然允许一次非流式回退。
+        // 判据是「正文是否完整取回」，不能是「响应头声明了什么类型」。
+        var executor = java.util.concurrent.Executors.newCachedThreadPool();
+        HttpServer stalling = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        stalling.setExecutor(executor);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger streamAttempts = new AtomicInteger();
+        AtomicInteger nonStreamAttempts = new AtomicInteger();
+        stalling.createContext("/", exchange -> {
+            String body = readBody(exchange);
+            if (!isStreamingRequest(body)) {
+                nonStreamAttempts.incrementAndGet();
+                chatJson(exchange, false);
+                return;
+            }
+            streamAttempts.incrementAndGet();
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, 0);
+            OutputStream out = exchange.getResponseBody();
+            out.write("{\"id\":\"id-1\",\"choices\":[{\"index\":0,".getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            }
+            exchange.close();
+        });
+        stalling.start();
+        try {
+            SiteThrottleScheduler gate = new SiteThrottleScheduler(Duration.ofMillis(10), Duration.ofMillis(10));
+            StreamingHttpTransport transport = new StreamingHttpTransport(Duration.ofMillis(300), gate);
+            List<TransportNotice> notices = new CopyOnWriteArrayList<>();
+            HttpRequest request = HttpRequest.newBuilder(URI.create(
+                            "http://127.0.0.1:" + stalling.getAddress().getPort() + "/"))
+                    .timeout(Duration.ofSeconds(5))
+                    .POST(HttpRequest.BodyPublishers.ofString(chatRequestBody())).build();
+            StreamingHttpTransport.Call call = transport.prepare(client(),
+                    StreamingHttpTransport.freeze(request), SiteProtocol.CHAT_COMPLETIONS, null,
+                    "stalled-json-site", null, enabledPolicy(), new StreamingHttpTransport.AttemptListener() {
+                        @Override
+                        public void onScheduled(StreamingHttpTransport.AttemptListener.Stage stage,
+                                                boolean firstAttempt, int retryOrdinal, boolean rateLimited,
+                                                StreamingHttpTransport.AttemptListener.Cause cause) {
+                            notices.add(new TransportNotice(cause, retryOrdinal));
+                        }
+
+                        @Override
+                        public void onSendStart(boolean firstAttempt, boolean fallback) {
+                        }
+                    });
+            call.start();
+            HttpResponse<String> response = call.future().get(10, TimeUnit.SECONDS);
+            assertEquals(200, response.statusCode());
+            assertEquals(1, streamAttempts.get());
+            assertEquals(1, nonStreamAttempts.get());
+            assertTrue(call.session().usedFallback(), "正文中途失败应当仍然允许非流式回退");
+            assertFalse(call.session().transportRetried(), "已收到响应头，不走响应头前的流式重发");
+            assertEquals(1, notices.size());
+            assertEquals(StreamingHttpTransport.AttemptListener.Cause.FALLBACK, notices.get(0).cause());
+            gate.discardAll();
+        } finally {
+            release.countDown();
+            stalling.stop(0);
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void preHeaderTransportFailureFallsBackWhenRetryDisabled() throws Exception {
         // 关闭重试时保留 #8 行为：没有等待与提示，静默改用非流式重发一次。
         // 必须经站点闸门路径验证：关闭重试后仍会交给 RetryNotifier 的 DISABLED 策略。
