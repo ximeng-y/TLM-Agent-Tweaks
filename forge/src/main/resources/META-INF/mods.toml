@@ -1,0 +1,43 @@
+modLoader = "javafml"
+loaderVersion = "[47,)"
+license = "MIT"
+
+[[mods]]
+modId = "${mod_id}"
+version = "${mod_version}"
+displayName = "${mod_name}"
+description = '''
+车万女仆（Touhou Little Maid）AI 功能增强：
+手动压缩聊天记录、按输入/输出/缓存命中的 token 明细统计与费用估算。
+与 Maid Self-Talk 可共存（互不为前置）。
+'''
+authors = "${mod_authors}"
+
+# Forge 1.20.1 的依赖块用 mandatory=<bool>（NeoForge 是 type="required"），写错整套 mod 文件会失效
+[[dependencies.${mod_id}]]
+    modId = "forge"
+    mandatory = true
+    versionRange = "[47,)"
+    ordering = "NONE"
+    side = "BOTH"
+
+[[dependencies.${mod_id}]]
+    modId = "minecraft"
+    mandatory = true
+    versionRange = "${minecraft_version_range}"
+    ordering = "NONE"
+    side = "BOTH"
+
+[[dependencies.${mod_id}]]
+    modId = "touhou_little_maid"
+    mandatory = true
+    versionRange = "${tlm_version_range}"
+    ordering = "AFTER"
+    side = "BOTH"
+
+[[dependencies.${mod_id}]]
+    modId = "cloth_config"
+    mandatory = false
+    versionRange = "[11.0,)"
+    ordering = "NONE"
+    side = "BOTH"

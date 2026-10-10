@@ -1,6 +1,6 @@
 # TLM Agent Tweaks
 
-车万女仆（[Touhou Little Maid](https://github.com/TartaricAcid/TouhouLittleMaid)）的 AI 功能增强附属 mod（NeoForge 1.21.1，需 TLM ≥ 1.5.3）。
+车万女仆（[Touhou Little Maid](https://github.com/TartaricAcid/TouhouLittleMaid)）的 AI 功能增强附属 mod（Forge 1.20.1 / NeoForge 1.21.1 双加载器，需 TLM ≥ 1.5.3）。
 
 ## 安装要求
 
@@ -10,7 +10,7 @@
 | 服务端不装、客户端装 | ❌ 禁止进入：客户端登录后会检测到服务器缺少本 mod 并主动断开（单人游戏不受此限制） |
 | 双端都装 | ✅ 完整功能 |
 
-网络通道以 optional 方式注册，配合客户端登录守卫实现上述非对称语义。
+网络通道以「允许缺失」方式注册（Forge 侧为 `NetworkRegistry.acceptMissingOr`，NeoForge 侧为 `optional()` 注册），配合客户端登录守卫实现上述非对称语义。
 
 ## 功能
 
@@ -31,23 +31,27 @@
 本仓库不携带 gradle wrapper（沿用本地惯例），使用本机缓存的 Gradle 8.14.2（如 Chunk-Plan 的 `.XMTEMP/gradle-8.14.2/bin/gradle`）：
 
 ```bash
-gradle :common:test      # 统计引擎单元测试
-gradle :neoforge:build   # 产出 neoforge/build/libs/tlm-agent-tweaks-<版本>-neoforge-1.21.1.jar
-gradle :neoforge:runServer   # 开发服务端冒烟（run/ 下已置 eula）
-gradle :neoforge:runClient   # 开发客户端
+gradle :common:test       # 统计引擎单元测试
+gradle :neoforge:build    # 产出 neoforge/build/libs/tlm-agent-tweaks-<版本>-neoforge-1.21.1.jar
+gradle :forge:build       # 产出 forge/build/libs/tlm-agent-tweaks-<版本>-forge-1.20.1.jar
+gradle :neoforge:runServer    # NeoForge 开发服务端冒烟
+gradle :neoforge:runClient    # NeoForge 开发客户端
+gradle :forge:runServer       # Forge 开发服务端冒烟
+gradle :forge:runClient       # Forge 开发客户端
 ```
 
-JDK 21 toolchain（路径固定在 `gradle.properties` 的 `org.gradle.java.installations.paths`）。
+toolchain：`common`/`neoforge` 用 JDK 21，`forge` 用 JDK 17（1.20.1 官方要求），路径固定在 `gradle.properties` 的 `org.gradle.java.installations.paths`。
 
 ## 工程结构（Chunk-Plan 式单分支混合工程）
 
 ```
 common/     纯 Java 统计引擎，零 Minecraft/TLM 依赖（Gson + slf4j 编译期），含 JUnit
 neoforge/   NeoForge 21.1 薄壳：入口/配置/mixin/网络/GUI/Cloth 集成
-            （common 源码经 sourceSets.java.srcDir 并入编译，不产独立 jar）
+forge/      Forge 1.20.1 薄壳：同上一套职责，Java 17 + ForgeGradle 6
+            （common 源码经 sourceSets.java.srcDir 并入两个薄壳编译，不产独立 jar）
 ```
 
-将来的 Forge 1.20.1 迁移只需新增 `forge` 薄壳子项目（Java 17 + ForgeGradle 6，同样并入 common 源码），无需分叉分支。
+两个薄壳共用同一份 `common` 源码，加载器差异各自在薄壳内消化，不分叉分支；区分只发生在出包时。
 
 ## 配置
 
@@ -88,7 +92,7 @@ neoforge/   NeoForge 21.1 薄壳：入口/配置/mixin/网络/GUI/Cloth 集成
 - 切出 Self-Talk 前由导航调用桥的 `prepareForNavigation`：有浮层时禁止切换，其余情况先保存 Prompt 再切换；每次重新进入 Self-Talk 都新建页面以重新请求配置，不缓存旧 dirty 回包守卫；
 - ESC 返回原始 AI 聊天屏；Token 统计页的返回目标为 Agent Tweaks 设置页；
 - 与不提供桥的旧版 Self-Talk 合装时，保留其第 4 槽原入口，本 mod 使用第 5 槽 🧩 提供独立设置入口；旧版无统一导航提示由入口 tooltip 与本文档说明，避免静默丢失入口；
-- Self-Talk 自身业务代码不迁移；当前统一导航仅在 NeoForge 1.21.1 侧实现，Forge 1.20.1 迁移尚未覆盖；
+- Self-Talk 自身业务代码不迁移；统一导航在两个加载器上均已实现；
 - 本 mod 在 `LLMCallback.onSuccess` / `onFailure` 的 HEAD 清理整轮预算并拦截超时后的迟到结果；状态码重试等待期间不调用 `onFailure`，整轮超时才派发最终失败。与 Self-Talk 的注入方法使用不同名称；
 - 已知微小行为：手动压缩的摘要回调会被 Self-Talk 视作一次「玩家聊天结束」而重置其聊天状态标记，影响可忽略。
 

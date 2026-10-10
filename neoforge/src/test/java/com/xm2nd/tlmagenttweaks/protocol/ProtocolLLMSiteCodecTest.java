@@ -22,9 +22,9 @@ class ProtocolLLMSiteCodecTest {
                 ResourceLocation.fromNamespaceAndPath("tlm_agent_tweaks", "test"),
                 "https://example.test/custom", true, "", Map.of(),
                 List.of(new LLMOpenAISite.ModelEntry("model-1")));
-        var encoded = ProtocolLLMSite.Serializer.CODEC.encodeStart(NbtOps.INSTANCE, original).getOrThrow();
+        var encoded = ProtocolLLMSite.Serializer.CODEC.encodeStart(NbtOps.INSTANCE, original).result().orElseThrow();
         ProtocolLLMSite decoded = assertInstanceOf(ProtocolLLMSite.class,
-                ProtocolLLMSite.Serializer.CODEC.parse(NbtOps.INSTANCE, encoded).getOrThrow());
+                ProtocolLLMSite.Serializer.CODEC.parse(NbtOps.INSTANCE, encoded).result().orElseThrow());
         assertEquals(SiteProtocol.CHAT_COMPLETIONS, decoded.protocol());
         assertEquals(UrlMode.EXACT, decoded.urlMode());
         LLMOpenAISite adapted = ProtocolBridge.withProtocol(original, SiteProtocol.RESPONSES, UrlMode.BASE);
@@ -50,10 +50,10 @@ class ProtocolLLMSiteCodecTest {
 
         CompoundTag encoded = (CompoundTag) ProtocolLLMSite.Serializer.CODEC
                 .encodeStart(NbtOps.INSTANCE, site)
-                .getOrThrow();
+                .result().orElseThrow();
         LLMOpenAISite decoded = ProtocolLLMSite.Serializer.CODEC
                 .parse(NbtOps.INSTANCE, encoded)
-                .getOrThrow();
+                .result().orElseThrow();
 
         ProtocolLLMSite protocolSite = assertInstanceOf(ProtocolLLMSite.class, decoded);
         assertEquals(SiteProtocol.ANTHROPIC_MESSAGES, protocolSite.protocol());
@@ -76,12 +76,12 @@ class ProtocolLLMSiteCodecTest {
 
         CompoundTag encoded = (CompoundTag) ProtocolLLMSite.Serializer.CODEC
                 .encodeStart(NbtOps.INSTANCE, site)
-                .getOrThrow();
+                .result().orElseThrow();
         encoded.remove("protocol");
         encoded.remove("url_mode");
 
         ProtocolLLMSite decoded = assertInstanceOf(ProtocolLLMSite.class,
-                ProtocolLLMSite.Serializer.CODEC.parse(NbtOps.INSTANCE, encoded).getOrThrow());
+                ProtocolLLMSite.Serializer.CODEC.parse(NbtOps.INSTANCE, encoded).result().orElseThrow());
         assertEquals(SiteProtocol.CHAT_COMPLETIONS, decoded.protocol());
         assertEquals(UrlMode.EXACT, decoded.urlMode());
     }

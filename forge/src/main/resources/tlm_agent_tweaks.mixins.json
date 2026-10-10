@@ -1,0 +1,22 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "com.xm2nd.tlmagenttweaks.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "tlm_agent_tweaks.refmap.json",
+  "mixins": [
+    "LLMOpenAIClientMixin",
+    "LLMCallbackMixin",
+    "HistorySummaryManagerInvoker"
+  ],
+  "client": [
+    "HistoryAIChatScreenMixin",
+    "AIChatScreenMixin",
+    "LLMSiteEditorScreenMixin",
+    "client.ChatBubbleRendererMixin",
+    "client.WaitingChatBubbleRendererAccessor"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
