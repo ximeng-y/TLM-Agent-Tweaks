@@ -11,6 +11,9 @@ import java.time.Duration;
  * 次数与等待时长本轮不开放配置，只提供 {@code retry.enabled} 总开关；
  * 站点积压放行间隔与单次重试等待取同一常量：一次重试正好对应一个站点额度周期，
  * 避免出现「重试比站点恢复还快」的无效请求。
+ * <p>
+ * 状态码重试与响应头前断连的流式重发共用这份等待与放行间隔，但各自独立计数：
+ * 传输重试不占用 {@link #MAX_RETRIES} 额度。
  */
 public final class RetrySettings {
 
