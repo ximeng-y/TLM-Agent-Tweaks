@@ -22,10 +22,16 @@ public final class RetryBubble {
     /** 流式断流改用非流式重发；不占用状态码重试次数，因此不显示次数。 */
     static final String FALLBACK = "chat.tlm_agent_tweaks.retry.fallback";
 
-    /** 站点冷却/积压导致的排队。占位符依次为：第几次、最多几次。 */
+    /** 非流式回退已经真正发出，正在等待响应。 */
+    static final String FALLBACK_SENT = "chat.tlm_agent_tweaks.retry.fallback.sent";
+
+    /** 响应头前断连，保持流式重发。占位符：等待秒数。 */
+    static final String TRANSPORT_RETRY = "chat.tlm_agent_tweaks.retry.transport";
+
+    /** 站点冷却/积压导致的排队。占位符依次为：已重试次数、最多几次。 */
     static final String SITE_QUEUE = "chat.tlm_agent_tweaks.retry.site_queue";
 
-    /** 首次发送就撞上站点冷却，此时还没有任何尝试失败，不显示次数。 */
+    /** 排队提示中不显示重试次数的变体：首次发送，或本次等待的起因不在状态码重试额度内。 */
     static final String SITE_QUEUE_FIRST = "chat.tlm_agent_tweaks.retry.site_queue.first";
 
     private RetryBubble() {
@@ -42,9 +48,25 @@ public final class RetryBubble {
         return Component.translatable(FALLBACK);
     }
 
-    /** 已经在站点队列中排队：区分「首次发送就在排队」和「重试过了仍在排队」。 */
+    /** 非流式回退已经发出：等待响应期间持续显示，直到本轮结束。 */
+    static Component fallbackSent() {
+        return Component.translatable(FALLBACK_SENT);
+    }
+
+    /** 响应头前断连、保持流式重发。 */
+    static Component transportRetry() {
+        long seconds = Math.max(1L, RetrySettings.RETRY_DELAY.toSeconds());
+        return Component.translatable(TRANSPORT_RETRY, seconds);
+    }
+
+    /**
+     * 已经在站点队列中排队：区分「首次发送就在排队」和「重试过了仍在排队」。
+     *
+     * @param ordinal 已消耗的状态码重试次数；传输重试与回退不占该额度，
+     *                此时传 0 走不显示次数的变体，避免出现「已重试 0/2 次」
+     */
     static Component siteQueue(int ordinal, int max, boolean firstAttempt) {
-        return firstAttempt
+        return firstAttempt || ordinal <= 0
                 ? Component.translatable(SITE_QUEUE_FIRST)
                 : Component.translatable(SITE_QUEUE, ordinal, max);
     }
