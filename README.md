@@ -121,20 +121,18 @@ URL 支持两种填写方式：
 - 站点明确不支持流式、流式中断或流式重发仍失败时，可再改用普通模式请求一次
 - 同一轮对话及其工具续接共享 **240 秒**总时限，不会无限等待
 
-重试次数、等待时间与总时限目前不可单独调整。自动重试总开关为公共配置中的 `retry.enabled`，**关闭后仍保留流式异常的普通模式回退**。
-
 **重试和回退会重新向站点发送请求，可能产生额外费用，也不保证一定成功。**
 
-## 与其他附属 Mod 配合
+## 与其他 Mod 的兼容
 
-### TLM Self-Talk
+### [TLM Self-Talk](https://github.com/ximeng-y/TouhouLittleMaid-Self-Talk)
 
 - 两个 Mod 互不为前置，可分别安装
 - 同装后，Self-Talk 发起的自言自语与互聊请求也可使用本 Mod 的协议适配、请求增强和 Token 统计
 - 支持统一导航的版本可切换两个独立设置页；不支持的版本保留各自入口
 - 自言自语、欢迎语、互聊及其提示词仍由 Self-Talk 管理
 
-### TouhouLittleMaid-MIMO-TTS
+### [TLM MIMO-TTS](https://github.com/ximeng-y/TouhouLittleMaid-MIMO-TTS)
 
 可与 MiMo TTS 附属 Mod 配合使用。本 Mod 负责 LLM 请求与相关展示，不替代其语音合成功能。
 
@@ -267,20 +265,18 @@ Automatic retries are enabled by default:
 - If the site explicitly does not support streaming, the stream is interrupted, or the streaming resend still fails, the request can be sent once more in non-streaming mode
 - A conversation and all of its tool-call continuations share a **240-second** total time limit, rather than waiting indefinitely
 
-The retry count, wait time, and total time limit cannot currently be adjusted individually. The automatic retry switch is `retry.enabled` in the common configuration. **Disabling it still preserves the non-streaming fallback for streaming failures.**
-
 **Retries and fallbacks send new requests to the site, may incur additional charges, and are not guaranteed to succeed.**
 
-## Compatibility with other add-ons
+## Compatibility with other Mods
 
-### TLM Self-Talk
+### [TLM Self-Talk](https://github.com/ximeng-y/TouhouLittleMaid-Self-Talk)
 
 - Neither mod requires the other; they can be installed independently
 - When both are installed, Self-Talk's self-talk and maid-to-maid chat requests can also use this mod's protocol adaptation, request enhancements, and token statistics
 - Versions supporting unified navigation can switch between the two independent settings pages; other versions retain separate entry buttons
 - Self-talk, welcome greetings, maid-to-maid chats, and their prompts remain managed by Self-Talk
 
-### TouhouLittleMaid-MIMO-TTS
+### [TLM MIMO-TTS](https://github.com/ximeng-y/TouhouLittleMaid-MIMO-TTS)
 
 Can be used alongside the MiMo TTS add-on. This mod handles LLM requests and related display features; it does not replace MiMo TTS's speech synthesis.
 
