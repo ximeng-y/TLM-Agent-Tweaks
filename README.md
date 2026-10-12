@@ -1,104 +1,289 @@
 # TLM Agent Tweaks
 
-车万女仆（[Touhou Little Maid](https://github.com/TartaricAcid/TouhouLittleMaid)）的 AI 功能增强附属 mod（Forge 1.20.1 / NeoForge 1.21.1 双加载器，需 TLM ≥ 1.5.3）。
-
-## 安装要求
-
-| 场景 | 结果 |
-| --- | --- |
-| 服务端装、客户端不装 | ✅ 可正常进服游玩，服务端 token 记账/压缩/统计照常运行；客户端只是看不到本 mod 的任何按钮与界面 |
-| 服务端不装、客户端装 | ❌ 禁止进入：客户端登录后会检测到服务器缺少本 mod 并主动断开（单人游戏不受此限制） |
-| 双端都装 | ✅ 完整功能 |
-
-网络通道以「允许缺失」方式注册（Forge 侧为 `NetworkRegistry.acceptMissingOr`，NeoForge 侧为 `optional()` 注册），配合客户端登录守卫实现上述非对称语义。
+给 [Touhou Little Maid](https://github.com/TartaricAcid/TouhouLittleMaid)（车万女仆）添加「多协议接入 / 思考链显示 / 请求重试 / Token 与费用统计」等 AI 功能增强的附属 Mod。
 
 ## 功能
 
-1. **AI 功能增强配置栏**：在 TLM 的 Cloth Config 设置页「AI 功能」大类下追加与 LLM/TTS/STT 并列的「AI 功能增强」子栏目（挂载方式与 Self-Talk 一致）。
-2. **手动压缩聊天记录**：在历史聊天记录界面「清空聊天记录」按钮上方新增「压缩聊天记录」按钮，调用车万女仆原生 LLM 摘要压缩；管理员可在配置栏设置阈值（K token），上次对话用量未达阈值时不允许压缩，防止反复压缩浪费 token。压缩成功后 TLM 会将用量计数清零，天然防连点。
-3. **token 明细统计**：按输入 / 输出 / 缓存命中 / 缓存写入四类记录每次 LLM 请求（覆盖普通聊天、自言自语、互聊、自动人设、知识库问答、历史压缩摘要），兼容 OpenAI（`prompt_tokens_details.cached_tokens`）、DeepSeek（`prompt_cache_hit_tokens`）、Anthropic 系代理（`cache_creation_input_tokens`）三种缓存计费字段口径。管理员可在 TLM 站点编辑器里点「💰 价格」为每个模型设置四类单价，支持 CNY / USD 双币种，**两币种独立存储、不按汇率换算**。
-4. **统一设置入口与 Token 统计详情页**：AI 聊天窗口提供 Agent Tweaks 设置页；与新版 Self-Talk 合装时，由 Self-Talk 的 💬 物理入口统一进入，并用左上角两个图标页签切换 Agent Tweaks / Self-Talk，Self-Talk 原有业务界面不迁移。仅管理员（默认 OP 2 级，可配置）可查看统计，包含三视图：
-   - **玩家排行**：一玩家一行 + 四色横向堆叠柱状图；
-   - **玩家明细**：四类 token、缓存命中率、CNY/USD 双币种消费金额（均点击排行行进入，‹ › 切换玩家）；
-   - **服务器总览**：粒度（时间窗口）可选 1/3/7/14/30/60/90/180/365day/all，窗口内按天出柱（180d/365d 自动按周、all 按月合并），四色竖向堆叠柱 + CNY/USD 双线成本折线图。
+- **多协议接入**：原版 Touhou Little Maid 仅支持 OpenAI Chat Completions；本 Mod 额外支持 OpenAI Responses、Anthropic Messages，可为不同模型站点选择对应协议
+- **思考链显示**：支持在「少女思考中」气泡里滚动显示模型返回的思考内容，执行工具时切回工具提示
+- **请求失败自动重试**：遇到限流或部分服务器错误时自动重试，等待期间会在气泡中显示状态
+- **流式请求支持**：支持以流式方式请求模型；站点不支持流式或流式响应中断时，可自动改用普通请求重新获取结果
+- **手动压缩聊天记录**：原版 Touhou Little Maid 仅支持自动压缩；本 Mod 支持在聊天历史界面主动生成历史摘要，保留近期对话；可设置最低 Token 用量，避免频繁压缩造成额外消耗
+- **Token 明细统计**：分别记录输入、输出、缓存命中、缓存写入用量，支持按玩家查看及服务器总览
+- **费用统计**：为每个站点下的模型设置价格，根据 Token 用量计算费用，支持人民币与美元计价
+- **图表与玩家排行**：查看玩家用量排行、玩家明细、服务器用量与费用趋势，支持选择统计时间范围
 
-5. **请求失败自动重试**：模型站点返回 429 或 500/502/503/504 时，同一轮对话内自动重发，每次请求最多额外重试 **2 次**、每次固定等待 **5 秒**（忽略 `Retry-After`，不做指数退避）。429 一律重试，不区分短期限流与配额耗尽。流式请求在收到响应头之前失败（断连、单次尝试超时）时，保持 `stream:true` 再发一次（独立 1 次额度，不占状态码重试次数）；该额度用尽后仍会改用普通模式回退一次，因为服务端只是不对流式请求回响应时普通请求往往是通的。响应头已到但正文没读完就失败（连接中断、读超时、零字节正文）同样会回退一次，与响应头声明的是 `text/event-stream` 还是 `application/json` 无关。重试期间只更新等待气泡，不输出聊天栏错误、不提前调用失败回调。站点被限流后进入 5 秒冷却，冷却期间尚未发出的请求排队延后，避免把一个正在限流的站点推向更深的限流。整轮对话（含全部工具续接）共享 240 秒固定预算。规则写死，仅提供 `retry.enabled` 总开关。详见 [docs/llm-request-retry.md](docs/llm-request-retry.md)。
+## 环境要求
 
-6. **思考链气泡滚动**：把模型的思考（reasoning）增量滚动显示在 TLM 原生「少女思考中」等待气泡内——单行、定宽、超宽时左侧填充右侧滚出；换行即清空重填。进入工具执行阶段时切回 TLM 原生的工具提示文本，请求结束/失败/取消时清空。流式断流改用普通模式重发时**不补播**中断前的片段，并在回退请求真正发出后显示「已改用普通模式发送，等待响应…」；传输重试与状态码重试则从空窗口恢复滚动。每个玩家可在设置页顶部按钮单独开关（默认开启，仅影响本机显示，不改变请求）。详见 [docs/thinking-bubble.md](docs/thinking-bubble.md)。
+| 加载器 | Minecraft | Java | Touhou Little Maid |
+| --- | --- | --- | --- |
+| NeoForge | 1.21.1 | 21 | 1.5.3 |
+| Forge | 1.20.1 | 17 | 1.5.3 |
 
-## 构建
+请安装与 Minecraft 版本及加载器对应的文件。
 
-本仓库不携带 gradle wrapper（沿用本地惯例），使用本机缓存的 Gradle 8.14.2（如 Chunk-Plan 的 `.XMTEMP/gradle-8.14.2/bin/gradle`）：
+Cloth Config 为可选依赖，用于在车万女仆设置页中显示「AI 功能增强」配置栏目。
 
-```bash
-gradle :common:test       # 统计引擎单元测试
-gradle :neoforge:build    # 产出 neoforge/build/libs/tlm-agent-tweaks-<版本>-neoforge-1.21.1.jar
-gradle :forge:build       # 产出 forge/build/libs/tlm-agent-tweaks-<版本>-forge-1.20.1.jar
-gradle :neoforge:runServer    # NeoForge 开发服务端冒烟
-gradle :neoforge:runClient    # NeoForge 开发客户端
-gradle :forge:runServer       # Forge 开发服务端冒烟
-gradle :forge:runClient       # Forge 开发客户端
-```
+## 安装
 
-toolchain：`common`/`neoforge` 用 JDK 21，`forge` 用 JDK 17（1.20.1 官方要求），路径固定在 `gradle.properties` 的 `org.gradle.java.installations.paths`。
+1. 安装对应版本的 Touhou Little Maid 及其前置依赖
+2. 将本 Mod 对应版本的 jar 放入 `mods` 文件夹
+3. 在车万女仆中配置可用的 AI 站点和模型
 
-## 工程结构（Chunk-Plan 式单分支混合工程）
+单人游戏正常安装即可。多人服务器的安装要求如下：
 
-```
-common/     纯 Java 统计引擎，零 Minecraft/TLM 依赖（Gson + slf4j 编译期），含 JUnit
-neoforge/   NeoForge 21.1 薄壳：入口/配置/mixin/网络/GUI/Cloth 集成
-forge/      Forge 1.20.1 薄壳：同上一套职责，Java 17 + ForgeGradle 6
-            （common 源码经 sourceSets.java.srcDir 并入两个薄壳编译，不产独立 jar）
-```
-
-两个薄壳共用同一份 `common` 源码，加载器差异各自在薄壳内消化，不分叉分支；区分只发生在出包时。
-
-## 配置
-
-`config/tlm_agent_tweaks-common.toml`（也可在游戏内 TLM 设置页 → AI 功能 → AI 功能增强 中修改）：
-
-| 键 | 默认 | 说明 |
+| 服务端 | 客户端 | 使用情况 |
 | --- | --- | --- |
-| `compress.manualThresholdK` | `8` | 手动压缩阈值（K token） |
-| `stats.enabled` | `true` | token 统计总开关 |
-| `stats.adminPermissionLevel` | `2` | 查看统计/设置价格所需 OP 等级 |
-| `stats.recordSummaryCalls` | `true` | 压缩摘要请求是否计入统计 |
-| `retry.enabled` | `true` | 请求失败自动重试总开关（关闭后无重试、无站点冷却、无传输重试，也不再有回退已发出的气泡提示；流式断流改用非流式重发不受影响） |
+| 已安装 | 已安装 | 可使用完整功能 |
+| 已安装 | 未安装 | 可以正常进服，服务端请求增强与统计继续运行，但该玩家看不到本 Mod 的按钮、统计界面和思考链显示 |
+| 未安装 | 已安装 | 无法进入服务器，客户端会提示服务器缺少本 Mod |
 
-客户端本地配置 `config/tlm_agent_tweaks-client.toml`（仅客户端，不同步到服务器）：
+## 使用
 
-| 键 | 默认 | 说明 |
+### 配置站点协议
+
+打开车万女仆的 **LLM 站点编辑器**，点击 URL 输入框右侧的「协议设置」：
+
+- **Chat Completions**：使用 OpenAI Chat Completions 兼容接口
+- **Responses**：使用 OpenAI Responses 接口
+- **Anthropic Messages**：使用 Anthropic Messages 接口
+
+URL 支持两种填写方式：
+
+- **基地址**：由 Mod 根据所选协议补全接口路径
+- **完整端点**：直接使用填写的完整请求地址
+
+页面会显示最终请求 URL，方便检查。协议需要按服务商实际提供的接口选择，不会自动识别。
+
+### 玩家独立设置
+
+对着女仆打开 AI 聊天输入界面（通常是按 T 键），点击左侧 **🧩** 按钮打开 Agent Tweaks 设置：
+
+- **显示思考链**：默认开启，只影响自己看到的气泡，不改变模型请求，也不影响其他玩家
+- **Token 消耗详情**：打开统计界面，需要管理员权限
+
+> 思考链显示需要模型和站点实际返回可展示的思考内容。它只改变「少女思考中」气泡，不会把思考内容写入聊天记录或交给 TTS 播报，也不改变最终回答原有的展示方式。
+
+### 手动压缩聊天记录
+
+打开女仆的历史聊天记录界面，点击「清空聊天记录」上方的 **「压缩聊天记录」**：
+
+- 仅女仆主人可以发起压缩
+- 将较早的聊天内容总结为摘要，降低上下文长度
+- 默认要求上次对话用量达到 **8K Token 的阈值（管理员可调整）**，并有足够的历史内容可供压缩
+- 压缩过程中不能重复发起，完成后会刷新摘要与聊天记录
+
+**压缩会调用模型并产生 Token 消耗。** 这是额外提供的手动入口，不替代车万女仆原有的自动压缩。
+
+### Token 与费用统计
+
+进入 **Agent Tweaks 设置 → Token 消耗详情**：
+
+- **玩家排行**：按玩家查看用量，通过不同颜色区分四类 Token
+- **玩家明细**：查看具体用量、缓存命中率与费用，可通过下拉框切换玩家
+- **服务器总览**：查看所选时间范围内的用量柱状图与费用趋势
+
+统计按**女仆主人**归属，自言自语和互聊等女仆主动发起的请求也计入主人名下。
+
+查看统计与设置模型价格默认需要 **OP 2 级权限**，管理员可调整权限要求。
+
+### 设置模型价格
+
+在 **LLM 站点编辑器**中，点击对应模型所在行的 **价格按钮**：
+
+- 分别填写输入、输出、缓存命中、缓存写入四类价格
+- 单位为**每百万 Token**
+- 人民币与美元独立设置，**不会自动按汇率换算**
+- 价格按站点和模型分别保存，同名模型在不同站点可以使用不同价格
+
+**费用仅供参考和估算，实际仍以服务商端消耗为准。**
+
+- 价格需要手动填写，不会自动获取
+- 历史费用按查询时的当前价格计算，修改价格也会影响历史费用显示
+- 用量依赖接口返回的数据；未返回的用量不会凭空估算，失败或中断请求产生的实际费用可能没有被完整记录
+
+### 全局配置
+
+安装 Cloth Config 后，在车万女仆设置页的 **「AI 功能 → AI 功能增强」** 中调整：
+
+- **手动压缩阈值**：默认 8K Token
+- **Token 统计**：默认开启
+- **管理员权限等级**：默认 OP 2 级
+- **记录摘要请求**：默认开启，将历史压缩摘要的用量计入统计
+
+### 自动重试与流式回退
+
+自动重试默认开启：
+
+- 遇到 **429、500、502、503、504** 时，每次请求最多额外重试 **2 次**
+- 每次重试先等待 **5 秒**；遇到站点排队时，实际发送可能更晚
+- 流式请求在收到响应头之前失败时，另有一次保持流式的重发机会
+- 站点明确不支持流式、流式中断或流式重发仍失败时，可再改用普通模式请求一次
+- 同一轮对话及其工具续接共享 **240 秒**总时限，不会无限等待
+
+重试次数、等待时间与总时限目前不可单独调整。自动重试总开关为公共配置中的 `retry.enabled`，**关闭后仍保留流式异常的普通模式回退**。
+
+**重试和回退会重新向站点发送请求，可能产生额外费用，也不保证一定成功。**
+
+## 与其他附属 Mod 配合
+
+### TLM Self-Talk
+
+- 两个 Mod 互不为前置，可分别安装
+- 同装后，Self-Talk 发起的自言自语与互聊请求也可使用本 Mod 的协议适配、请求增强和 Token 统计
+- 支持统一导航的版本可切换两个独立设置页；不支持的版本保留各自入口
+- 自言自语、欢迎语、互聊及其提示词仍由 Self-Talk 管理
+
+### TouhouLittleMaid-MIMO-TTS
+
+可与 MiMo TTS 附属 Mod 配合使用。本 Mod 负责 LLM 请求与相关展示，不替代其语音合成功能。
+
+## 许可
+
+MIT
+
+---
+
+# TLM Agent Tweaks (English)
+
+An add-on for [Touhou Little Maid](https://github.com/TartaricAcid/TouhouLittleMaid) that enhances its AI features with **multiple API protocols / reasoning display / request retries / token and cost statistics**.
+
+## Features
+
+- **Multiple API protocols**: Touhou Little Maid originally supports only OpenAI Chat Completions. This mod additionally supports OpenAI Responses and Anthropic Messages, with a protocol setting for each model site
+- **Reasoning display**: Supports scrolling the model's reasoning inside the "The maid is thinking..." bubble, switching back to tool-call hints while tools are running
+- **Automatic request retries**: Automatically retries rate-limited requests and certain server errors, with status messages shown in the bubble while waiting
+- **Streaming request support**: Supports streaming requests to models. If a site does not support streaming or a stream is interrupted, the mod can automatically send a non-streaming request to retrieve the result
+- **Manual chat history compression**: Touhou Little Maid originally supports only automatic compression. This mod lets you generate a history summary from the chat history screen while retaining recent conversations. A minimum token threshold can be set to avoid extra usage from frequent compression
+- **Detailed token statistics**: Tracks input, output, cache read, and cache write tokens separately, with per-player views and a server overview
+- **Cost statistics**: Set model prices for each site and calculate costs from token usage, with support for CNY and USD
+- **Charts and player rankings**: View player usage rankings, individual player details, and server-wide usage and cost trends over a selected time range
+
+## Requirements
+
+| Loader | Minecraft | Java | Touhou Little Maid |
+| --- | --- | --- | --- |
+| NeoForge | 1.21.1 | 21 | 1.5.3 |
+| Forge | 1.20.1 | 17 | 1.5.3 |
+
+Install the file that matches your Minecraft version and mod loader.
+
+Cloth Config is an optional dependency that adds the Agent Tweaks configuration section to Touhou Little Maid's settings.
+
+## Installation
+
+1. Install the matching version of Touhou Little Maid and its required dependencies
+2. Place the matching jar for this mod in the `mods` folder
+3. Configure an available AI site and model in Touhou Little Maid
+
+For single-player, install the mod normally. Multiplayer installation requirements are as follows:
+
+| Server | Client | Behavior |
 | --- | --- | --- |
-| `thinking.showReasoning` | `true` | 是否在本机等待气泡中滚动显示模型思考链（游戏内 Agent Tweaks 设置页顶部按钮可切换） |
+| Installed | Installed | All features are available |
+| Installed | Not installed | The player can join normally. Server-side request enhancements and statistics remain active, but the player cannot see this mod's buttons, statistics screens, or reasoning display |
+| Not installed | Installed | The player cannot join; the client reports that the server is missing this mod |
 
-## 数据文件
+## Usage
 
-- 统计数据：`<世界存档>/tlm_agent_tweaks/stats-yyyy-MM.json`（按月分文件，原子写入，服务端每 5 分钟与停服时落盘）
-- 模型价格：`config/tlm_agent_tweaks/prices.json`（全局，不随世界）
+### Configure the site protocol
 
-**成本按查询时现价计算**：修改价格会追溯影响全部历史成本显示（记录只存 token 数量，不存储当时价格）。
+Open Touhou Little Maid's **LLM site editor** and click "Protocol Settings" to the right of the URL field:
 
-## 价格设置的口径
+- **Chat Completions**: Uses an OpenAI Chat Completions-compatible API
+- **Responses**: Uses the OpenAI Responses API
+- **Anthropic Messages**: Uses the Anthropic Messages API
 
-- 模型列表只从管理员配置的可用站点表读取（与 TLM 的 LLM 模型选择弹窗同源），新建未保存的站点无法设价；
-- 价格单位为「每百万 token」；四类：输入 / 输出 / 缓存命中 / 缓存写入；
-- CNY 与 USD 各自独立配置，可同时存在，互不换算；某币种未配置任何模型时，统计页不显示该币种。
+There are two URL modes:
 
-## 与 Maid Self-Talk 的兼容
+- **Base URL**: The mod appends the API path for the selected protocol
+- **Exact endpoint**: Uses the complete request URL exactly as entered
 
-- 互不为前置、可同装也可只装其一；
-- 未装 Self-Talk 时，本 mod 在 AI 聊天窗口注册第 4 槽的 🧩 独立设置入口；
-- 与提供 `SelfTalkSettingsBridge` 的新版 Self-Talk 合装时，Self-Talk 保留并注册第 4 槽 💬 物理入口，点击后委托本 mod 打开统一导航；Agent Tweaks 与 Self-Talk 页面保持为两个真实独立 Screen，通过左上角 `20x20` 图标页签切换，页签位于 `(6, 4)` 并提供完整 tooltip；
-- 切出 Self-Talk 前由导航调用桥的 `prepareForNavigation`：有浮层时禁止切换，其余情况先保存 Prompt 再切换；每次重新进入 Self-Talk 都新建页面以重新请求配置，不缓存旧 dirty 回包守卫；
-- ESC 返回原始 AI 聊天屏；Token 统计页的返回目标为 Agent Tweaks 设置页；
-- 与不提供桥的旧版 Self-Talk 合装时，保留其第 4 槽原入口，本 mod 使用第 5 槽 🧩 提供独立设置入口；旧版无统一导航提示由入口 tooltip 与本文档说明，避免静默丢失入口；
-- Self-Talk 自身业务代码不迁移；统一导航在两个加载器上均已实现；
-- 本 mod 在 `LLMCallback.onSuccess` / `onFailure` 的 HEAD 清理整轮预算并拦截超时后的迟到结果；状态码重试等待期间不调用 `onFailure`，整轮超时才派发最终失败。与 Self-Talk 的注入方法使用不同名称；
-- 已知微小行为：手动压缩的摘要回调会被 Self-Talk 视作一次「玩家聊天结束」而重置其聊天状态标记，影响可忽略。
+The screen previews the final request URL for checking. Choose the protocol according to the API your provider actually offers; it is not detected automatically.
 
-## 统计口径备注
+### Per-player settings
 
-- 归属：按女仆主人 UUID 记账（自言自语、互聊等女仆自发请求同样计入其主人名下）；
-- 输入 = `prompt_tokens − 缓存命中`（下限 0）；输出 = `completion_tokens`；
-- 缓存命中率 = 缓存命中 / prompt；
-- 记录点位于 `LLMOpenAIClient.handle` 头部，直接解析原始响应体，不依赖 TLM 的 Usage 解析（TLM 只保留 total_tokens）。
+Open the maid's AI chat input screen while looking at her (usually by pressing T), then click the **🧩** button on the left to open Agent Tweaks settings:
+
+- **Show Thinking**: On by default. Only affects the bubbles you see; it does not change model requests or affect other players
+- **Token Stats**: Opens the statistics screen; administrator permission is required
+
+> Reasoning display requires the model and site to actually return displayable reasoning content. It only changes the "The maid is thinking..." bubble. Reasoning is not written to chat history or sent to TTS, and the final answer's existing presentation is unchanged.
+
+### Manually compress chat history
+
+Open the maid's chat history screen and click **"Compress History"** above "Clear History Chat":
+
+- Only the maid's owner can start compression
+- Summarizes older conversations to reduce context length
+- By default, the previous conversation's usage must reach the **8K-token threshold (adjustable by administrators)**, and there must be enough history to compress
+- Another compression cannot be started while one is running; the summary and history refresh when it finishes
+
+**Compression calls the model and consumes tokens.** This is an additional manual option, not a replacement for Touhou Little Maid's original automatic compression.
+
+### Token and cost statistics
+
+Go to **Agent Tweaks settings → Token Stats**:
+
+- **Ranking**: View usage by player, with different colors for the four token categories
+- **Player**: View detailed usage, cache hit rate, and costs; switch players with the dropdown
+- **Server**: View usage bar charts and cost trends for the selected time range
+
+Usage is attributed to the **maid's owner**. Requests initiated by maids, such as self-talk and maid-to-maid chats, are also counted under their owner.
+
+Viewing statistics and setting model prices requires **OP permission level 2** by default. Administrators can change this requirement.
+
+### Set model prices
+
+In the **LLM site editor**, click the **price button** on the corresponding model's row:
+
+- Enter separate prices for input, output, cache read, and cache write tokens
+- Prices are **per million tokens**
+- CNY and USD are configured independently, with **no automatic exchange-rate conversion**
+- Prices are saved separately for each site and model, so the same model can have different prices on different sites
+
+**Costs are for reference and estimation only; actual usage and charges are determined by the service provider.**
+
+- Prices must be entered manually and are not fetched automatically
+- Historical costs are calculated using the current prices at query time; changing prices also changes the displayed historical costs
+- Usage depends on data returned by the API. Missing usage is not estimated, and actual charges from failed or interrupted requests may not be fully recorded
+
+### Global configuration
+
+With Cloth Config installed, open the **AI features → Agent Tweaks** section in Touhou Little Maid's settings to adjust:
+
+- **Manual Compress Threshold**: 8K tokens by default
+- **Enable token statistics**: On by default
+- **Stats view permission level**: OP level 2 by default
+- **Count summary requests in stats**: On by default; includes usage from chat history compression summaries
+
+### Automatic retries and streaming fallback
+
+Automatic retries are enabled by default:
+
+- For **429, 500, 502, 503, and 504**, each request can be retried up to **2 additional times**
+- Each retry waits **5 seconds** first; site queuing may delay the actual send further
+- If a streaming request fails before response headers arrive, it has one additional chance to be resent as a streaming request
+- If the site explicitly does not support streaming, the stream is interrupted, or the streaming resend still fails, the request can be sent once more in non-streaming mode
+- A conversation and all of its tool-call continuations share a **240-second** total time limit, rather than waiting indefinitely
+
+The retry count, wait time, and total time limit cannot currently be adjusted individually. The automatic retry switch is `retry.enabled` in the common configuration. **Disabling it still preserves the non-streaming fallback for streaming failures.**
+
+**Retries and fallbacks send new requests to the site, may incur additional charges, and are not guaranteed to succeed.**
+
+## Compatibility with other add-ons
+
+### TLM Self-Talk
+
+- Neither mod requires the other; they can be installed independently
+- When both are installed, Self-Talk's self-talk and maid-to-maid chat requests can also use this mod's protocol adaptation, request enhancements, and token statistics
+- Versions supporting unified navigation can switch between the two independent settings pages; other versions retain separate entry buttons
+- Self-talk, welcome greetings, maid-to-maid chats, and their prompts remain managed by Self-Talk
+
+### TouhouLittleMaid-MIMO-TTS
+
+Can be used alongside the MiMo TTS add-on. This mod handles LLM requests and related display features; it does not replace MiMo TTS's speech synthesis.
+
+## License
+
+MIT
