@@ -1,6 +1,6 @@
 # TLM Agent Tweaks
 
-给 [Touhou Little Maid](https://github.com/TartaricAcid/TouhouLittleMaid)（车万女仆）添加「多协议接入 / 思考链显示 / 请求重试 / Token 与费用统计」等 AI 功能增强的附属 Mod。
+给 Touhou Little Maid（车万女仆）添加「多协议接入 / 思考链显示 / 请求重试 / Token 与费用统计」等 AI 功能增强的附属 Mod。
 
 ## 功能
 
@@ -125,14 +125,14 @@ URL 支持两种填写方式：
 
 ## 与其他 Mod 的兼容
 
-### [TLM Self-Talk](https://github.com/ximeng-y/TouhouLittleMaid-Self-Talk)
+### TLM Self-Talk
 
 - 两个 Mod 互不为前置，可分别安装
 - 同装后，Self-Talk 发起的自言自语与互聊请求也可使用本 Mod 的协议适配、请求增强和 Token 统计
 - 支持统一导航的版本可切换两个独立设置页；不支持的版本保留各自入口
 - 自言自语、欢迎语、互聊及其提示词仍由 Self-Talk 管理
 
-### [TLM MIMO-TTS](https://github.com/ximeng-y/TouhouLittleMaid-MIMO-TTS)
+### TLM MIMO-TTS
 
 可与 MiMo TTS 附属 Mod 配合使用。本 Mod 负责 LLM 请求与相关展示，不替代其语音合成功能。
 
@@ -144,7 +144,7 @@ MIT
 
 # TLM Agent Tweaks (English)
 
-An add-on for [Touhou Little Maid](https://github.com/TartaricAcid/TouhouLittleMaid) that enhances its AI features with **multiple API protocols / reasoning display / request retries / token and cost statistics**.
+An add-on for Touhou Little Maid that enhances its AI features with **multiple API protocols / reasoning display / request retries / token and cost statistics**.
 
 ## Features
 
@@ -269,14 +269,14 @@ Automatic retries are enabled by default:
 
 ## Compatibility with other Mods
 
-### [TLM Self-Talk](https://github.com/ximeng-y/TouhouLittleMaid-Self-Talk)
+### TLM Self-Talk
 
 - Neither mod requires the other; they can be installed independently
 - When both are installed, Self-Talk's self-talk and maid-to-maid chat requests can also use this mod's protocol adaptation, request enhancements, and token statistics
 - Versions supporting unified navigation can switch between the two independent settings pages; other versions retain separate entry buttons
 - Self-talk, welcome greetings, maid-to-maid chats, and their prompts remain managed by Self-Talk
 
-### [TLM MIMO-TTS](https://github.com/ximeng-y/TouhouLittleMaid-MIMO-TTS)
+### TLM MIMO-TTS
 
 Can be used alongside the MiMo TTS add-on. This mod handles LLM requests and related display features; it does not replace MiMo TTS's speech synthesis.
 
