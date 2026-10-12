@@ -23,8 +23,8 @@ import java.lang.reflect.Method;
 /**
  * 在 AI 聊天输入界面左侧按钮组末尾追加 Agent Tweaks 入口。
  * <p>
- * 新版 Self-Talk 通过桥接管物理按钮时不再注册；旧版 Self-Talk 保留其第 4 槽，
- * 本 mod 使用第 5 槽提供独立 Tweaks 入口，避免静默丢失设置入口。
+ * Self-Talk 已安装时保留其第 4 槽，本 mod 使用第 5 槽提供直接进入 Tweaks 的入口；
+ * 接入设置导航桥后，两个入口仍共用页面切换导航。
  */
 @Mixin(AIChatScreen.class)
 public abstract class AIChatScreenMixin {
@@ -36,19 +36,15 @@ public abstract class AIChatScreenMixin {
     @Inject(method = "init", at = @At("TAIL"), remap = false)
     private void tlmAgentTweaks$addTweaksEntryButton(CallbackInfo ci) {
         boolean selfTalkLoaded = ModList.get().isLoaded("maid_self_talk");
-        if (selfTalkLoaded && SelfTalkNavigationBridge.isAvailable()) {
-            // 新版 Self-Talk 的物理入口已委托本 mod 打开，避免注册重复按钮
-            return;
-        }
         AIChatScreen screen = (AIChatScreen) (Object) this;
-        // 与 AIChatScreen.init 相同的布局参数：单装用第 4 槽，旧版 Self-Talk 用第 5 槽
+        // 与 AIChatScreen.init 相同的布局参数：单装用第 4 槽，兼装 Self-Talk 用第 5 槽
         int size = 18;
         int inputX = screen.width / 2 - 165;
         int inputY = screen.height / 2 + 58;
         int slot = selfTalkLoaded ? 4 : 3;
         int leftX = inputX - 8 + slot * (size + 2);
         int y = inputY - 28;
-        String tooltipKey = selfTalkLoaded
+        String tooltipKey = selfTalkLoaded && !SelfTalkNavigationBridge.isAvailable()
                 ? "gui.tlm_agent_tweaks.button.legacy_settings_entry.tip"
                 : "gui.tlm_agent_tweaks.button.settings_entry.tip";
 

@@ -18,8 +18,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /**
  * 在 AI 聊天输入界面左侧按钮组末尾追加 Agent Tweaks 入口。
  * <p>
- * 新版 Self-Talk 通过桥接管物理按钮时不再注册；旧版 Self-Talk 保留其第 4 槽，
- * 本 mod 使用第 5 槽提供独立 Tweaks 入口，避免静默丢失设置入口。
+ * Self-Talk 已安装时保留其第 4 槽，本 mod 使用第 5 槽提供直接进入 Tweaks 的入口；
+ * 接入设置导航桥后，两个入口仍共用页面切换导航。
  * <p>
  * 注入点选 TLM 自有私有方法 {@code addLeftButtons}（而非原版 {@code init}）：
  * Forge 1.20.1 生产环境会把覆写原版的方法重命名为 SRG 名（{@code init} → {@code m_7856_}），
@@ -49,14 +49,10 @@ public abstract class AIChatScreenMixin extends Screen {
     @Inject(method = "addLeftButtons", at = @At("TAIL"), remap = false)
     private void tlmAgentTweaks$addTweaksEntryButton(int leftX, int y, int size, int gap, CallbackInfo ci) {
         boolean selfTalkLoaded = ModList.get().isLoaded("maid_self_talk");
-        if (selfTalkLoaded && SelfTalkNavigationBridge.isAvailable()) {
-            // 新版 Self-Talk 的物理入口已委托本 mod 打开，避免注册重复按钮
-            return;
-        }
-        // 单装时占第 4 槽；旧版 Self-Talk 已占用第 4 槽，本 mod 用第 5 槽
+        // 单装时占第 4 槽；Self-Talk 已占用第 4 槽，本 mod 用第 5 槽
         int slot = selfTalkLoaded ? 2 : 1;
         int x = leftX + slot * (size + gap);
-        String tooltipKey = selfTalkLoaded
+        String tooltipKey = selfTalkLoaded && !SelfTalkNavigationBridge.isAvailable()
                 ? "gui.tlm_agent_tweaks.button.legacy_settings_entry.tip"
                 : "gui.tlm_agent_tweaks.button.settings_entry.tip";
 
