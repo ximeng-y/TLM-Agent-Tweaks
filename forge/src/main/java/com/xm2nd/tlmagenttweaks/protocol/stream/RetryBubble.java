@@ -28,7 +28,7 @@ public final class RetryBubble {
     /** 响应头前断连，保持流式重发。占位符：等待秒数。 */
     static final String TRANSPORT_RETRY = "chat.tlm_agent_tweaks.retry.transport";
 
-    /** 站点冷却/积压导致的排队。占位符依次为：已重试次数、最多几次。 */
+    /** 站点冷却或同站点发送间隔导致的排队。占位符依次为：已重试次数、最多几次。 */
     static final String SITE_QUEUE = "chat.tlm_agent_tweaks.retry.site_queue";
 
     /** 排队提示中不显示重试次数的变体：首次发送，或本次等待的起因不在状态码重试额度内。 */

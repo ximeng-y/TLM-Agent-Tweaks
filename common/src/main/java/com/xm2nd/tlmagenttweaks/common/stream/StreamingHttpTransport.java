@@ -291,7 +291,7 @@ public final class StreamingHttpTransport {
         enum Stage {
             /** 本次请求自身的固定重试等待。 */
             RETRY_WAIT,
-            /** 站点冷却或积压导致的排队。 */
+            /** 站点冷却或同站点发送间隔导致的排队。 */
             SITE_QUEUE
         }
 
@@ -375,7 +375,7 @@ public final class StreamingHttpTransport {
             attempt(true, null);
         }
 
-        /** 提交一次尝试：先经过发送闸门（重试等待 + 站点冷却 + 积压间隔），再真正发出。 */
+        /** 提交一次尝试：先经过发送闸门（重试等待 + 站点冷却 + 同站点发送间隔），再真正发出。 */
         private void attempt(boolean streaming, AttemptListener.Cause cause) {
             if (isFinished()) {
                 return;

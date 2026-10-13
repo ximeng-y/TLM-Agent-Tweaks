@@ -17,20 +17,22 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 纯 JDK 站点发送调度器：把「请求自身的重试等待」与「站点级冷却/积压」排进同一条时间线。
+ * 纯 JDK 站点发送调度器：把「请求自身的重试等待」与「站点级冷却/发送间隔」排进同一条时间线。
  * <p>
  * 分两段，语义不同：
  * <ol>
  *   <li><b>自身等待</b>（{@code waiting}）：本次请求的重试等待期，只推迟自己，
- *       不影响同站点其他请求，也不占用站点额度；</li>
- *   <li><b>站点队列</b>（{@code queue}）：等待站点冷却结束，以及积压放行之间的最小间隔，整站共享。</li>
+ *       不影响同站点其他请求，也不占用站点发送额度；</li>
+ *   <li><b>站点队列</b>（{@code queue}）：等待站点冷却结束，以及距该站点上一次发送的最小间隔，整站共享。</li>
  * </ol>
  * 规则：
  * <ul>
  *   <li>冷却截止时刻只能被 {@link #throttle} 向后推（{@code max} 语义），不会被提前；</li>
  *   <li>站点处于冷却时该站点尚未发出的请求一律排队，已经发出的请求不受影响、不被取消；</li>
- *   <li>冷却结束后按 FIFO 放行，积压期间相邻放行至少间隔 {@code spacing}；</li>
- *   <li>队列清空后恢复正常直发，不永久限制站点吞吐；</li>
+ *   <li>同站点相邻两次发送至少间隔 {@code spacing}：截止时刻在每次放行后推进，
+ *       队列清空也不清除；空闲超过该间隔后到达的请求仍可立即发送；</li>
+ *   <li>请求自身的重试等待与站点时序并行满足，取两者中较晚的允许时刻；</li>
+ *   <li>放行回调统一在调度线程上串行执行，因此「获准」与「真正发出」之间不存在乱序窗口；</li>
  *   <li>不同站点状态完全独立，放行不等待已放行请求结束；</li>
  *   <li>用绝对截止时刻推进调度，不使用 {@code Thread.sleep}，也不阻塞服务端主线程。</li>
  * </ul>
@@ -65,25 +67,28 @@ public final class SiteThrottleScheduler implements SendGate {
     public Handle submit(String siteId, long waitForNanos, Send send) {
         Objects.requireNonNull(send, "send");
         Request request = new Request(siteId, waitForNanos, send);
-        List<Runnable> actions;
+        Runnable discarded = null;
         synchronized (lock) {
             if (stopped) {
-                runOne(request.discard());
-                return request;
-            }
-            SiteState site = site(request.siteId);
-            long now = System.nanoTime();
-            if (request.readyAt <= now) {
-                site.queue.addLast(request);
+                discarded = request.discard();
             } else {
-                // List 的 addLast 是 JDK 21 的 SequencedCollection 才有的方法，
-                // common 源码要同时被 Java 17 的 forge 薄壳编译，这里用 add
-                site.waiting.add(request);
+                SiteState site = site(request.siteId);
+                long now = System.nanoTime();
+                if (request.readyAt <= now) {
+                    site.queue.addLast(request);
+                } else {
+                    // List 的 addLast 是 JDK 21 的 SequencedCollection 才有的方法，
+                    // common 源码要同时被 Java 17 的 forge 薄壳编译，这里用 add
+                    site.waiting.add(request);
+                }
+                // 放行只在调度线程上发生：这里只登记，并让调度线程立刻按最新时序处理一次
+                // （放行条件未满足时该次处理只补发排队通知并改排到真正的允许时刻）。
+                schedule(site, now, now);
             }
-            actions = drain(site, now);
-            schedule(site, now);
         }
-        runAll(actions);
+        if (discarded != null) {
+            runOne(discarded);
+        }
         return request;
     }
 
@@ -93,7 +98,6 @@ public final class SiteThrottleScheduler implements SendGate {
             return;
         }
         long until = System.nanoTime() + cooldown.toNanos();
-        List<Runnable> actions;
         synchronized (lock) {
             SiteState site = sites.get(key(siteId));
             if (site == null) {
@@ -103,11 +107,10 @@ public final class SiteThrottleScheduler implements SendGate {
             if (until > site.cooldownUntil) {
                 site.cooldownUntil = until;
             }
+            // 只推进冷却并让调度线程立刻复核；放行一律留给调度线程，避免调用线程抢在间隔之前发出。
             long now = System.nanoTime();
-            actions = drain(site, now);
-            schedule(site, now);
+            schedule(site, now, now);
         }
-        runAll(actions);
     }
 
     /**
@@ -148,44 +151,100 @@ public final class SiteThrottleScheduler implements SendGate {
     }
 
     /**
-     * 推进时间线：先把自身等待结束的请求并入站点队列，再按冷却与放行间隔依次放行。
-     * 必须在锁内调用，返回的回调在锁外执行。
+     * 调度线程上唯一的放行入口：先把自身等待结束的请求并入就绪队列，再按时序取出至多一个
+     * 可放行请求。放行回调在锁外同步执行（回调返回前即完成 {@code sendAsync} 调用、不等待响应），
+     * 收尾阶段才推进该站点下一次允许发送的时刻。
      */
-    private List<Runnable> drain(SiteState site, long now) {
-        List<Runnable> actions = new ArrayList<>();
-        for (int i = site.waiting.size() - 1; i >= 0; i--) {
+    private void wake(SiteState site) {
+        Runnable granted;
+        List<Runnable> notices;
+        synchronized (lock) {
+            if (stopped || sites.get(site.siteId) != site) {
+                return;
+            }
+            site.task = null;
+            long now = System.nanoTime();
+            promoteReady(site, now);
+            granted = pollGrantable(site, now);
+            if (granted == null) {
+                // 放行则改为在放行收尾阶段重排，因此那里看到的是已推进的截止时间。
+                schedule(site, now);
+            }
+            notices = queuedNotices(site);
+        }
+        runAll(notices);
+        if (granted != null) {
+            runOne(granted);
+            finishGrant(site);
+        }
+    }
+
+    /** 把自身等待已经结束的请求按提交顺序并入就绪队列。必须在锁内调用。 */
+    private static void promoteReady(SiteState site, long now) {
+        for (int i = 0; i < site.waiting.size(); ) {
             Request request = site.waiting.get(i);
             if (request.readyAt <= now) {
                 site.waiting.remove(i);
                 site.queue.addLast(request);
+            } else {
+                i++;
             }
         }
-        long moment = now;
-        while (!site.queue.isEmpty() && site.cooldownUntil <= moment && site.nextReleaseAt <= moment) {
+    }
+
+    /**
+     * 取出至多一个可放行请求并认领放行状态；返回锁外执行的放行回调，无可用项时返回 {@code null}。
+     * 冷却与发送截止时间必须同时满足；已经终结的残留项直接跳过。必须在锁内调用。
+     */
+    private Runnable pollGrantable(SiteState site, long now) {
+        while (!site.queue.isEmpty() && site.cooldownUntil <= now && site.nextReleaseAt <= now) {
             Request request = site.queue.pollFirst();
             Runnable action = request.grant();
             if (action != null) {
-                actions.add(action);
+                return action;
             }
-            site.nextReleaseAt = site.queue.isEmpty() ? Long.MIN_VALUE : moment + spacingNanos;
-            moment = System.nanoTime();
         }
-        if (site.queue.isEmpty()) {
-            // 队列排空后恢复正常直发，不留下永久节流。
-            site.nextReleaseAt = Long.MIN_VALUE;
-        }
+        return null;
+    }
+
+    /** 就绪队列中每个尚未通知过的请求各补一次排队通知。必须在锁内调用。 */
+    private static List<Runnable> queuedNotices(SiteState site) {
+        List<Runnable> actions = new ArrayList<>();
         for (Request request : site.queue) {
-            Runnable action = request.markQueued();
-            if (action != null) {
-                actions.add(action);
-            }
+            SiteState.addAction(actions, request.markQueued());
         }
         return actions;
     }
 
-    /** 重排该站点的唤醒任务；已有不晚于所需时刻的唤醒时不重复安排。必须在锁内调用。 */
+    /**
+     * 放行收尾：以放行回调返回的时刻为起点推进该站点下一次允许发送的时间，然后重排唤醒。
+     * 起点取得比真正的发送时刻更晚，因此回调执行延迟只会让间隔更保守，不会侵蚀它。
+     * <p>
+     * 站点状态已被 {@link #discardAll()} 清空时直接返回：旧回调不得重新建立旧站点或恢复旧任务。
+     */
+    private void finishGrant(SiteState site) {
+        synchronized (lock) {
+            if (sites.get(site.siteId) != site) {
+                return;
+            }
+            long now = System.nanoTime();
+            site.nextReleaseAt = now + spacingNanos;
+            schedule(site, now);
+        }
+    }
+
+    /** 按站点自身时序重排唤醒任务。必须在锁内调用。 */
     private void schedule(SiteState site, long now) {
-        long target = site.nextWake();
+        schedule(site, now, Long.MAX_VALUE);
+    }
+
+    /**
+     * 重排该站点的唤醒任务；已有不晚于所需时刻的唤醒时不重复安排。
+     * {@code noLaterThan} 用于要求调度线程立刻复核一次（提交与冷却推进），
+     * 使排队通知无需等到真正允许发送的时刻才发出。必须在锁内调用。
+     */
+    private void schedule(SiteState site, long now, long noLaterThan) {
+        long target = Math.min(site.nextWake(), noLaterThan);
         if (target == Long.MAX_VALUE) {
             site.cancelTask();
             return;
@@ -195,29 +254,16 @@ public final class SiteThrottleScheduler implements SendGate {
         }
         site.cancelTask();
         site.taskAt = target;
+        // 不限制的截止时刻是 Long.MIN_VALUE，先比大小再相减，避免溢出成极大的正延迟。
+        long delay = target <= now ? 0L : target - now;
         try {
-            site.task = scheduler.schedule(() -> wake(site),
-                    Math.max(0L, target - now), TimeUnit.NANOSECONDS);
+            site.task = scheduler.schedule(() -> wake(site), delay, TimeUnit.NANOSECONDS);
         } catch (RejectedExecutionException e) {
             site.task = null;
             List<Runnable> actions = new ArrayList<>();
             site.discardAll(actions);
             runAll(actions);
         }
-    }
-
-    private void wake(SiteState site) {
-        List<Runnable> actions;
-        synchronized (lock) {
-            if (stopped || sites.get(site.siteId) != site) {
-                return;
-            }
-            site.task = null;
-            long now = System.nanoTime();
-            actions = drain(site, now);
-            schedule(site, now);
-        }
-        runAll(actions);
     }
 
     private static void runAll(List<Runnable> actions) {
@@ -242,7 +288,10 @@ public final class SiteThrottleScheduler implements SendGate {
         /** 已就绪、等待站点放行的请求，FIFO。 */
         private final Deque<Request> queue = new ArrayDeque<>();
         private long cooldownUntil = Long.MIN_VALUE;
-        /** 积压期间下一次允许放行的时刻；无积压时为 {@link Long#MIN_VALUE}（不限制）。 */
+        /**
+         * 该站点下一次允许发送的时刻；{@link Long#MIN_VALUE} 表示该站点尚未发送过、不限制。
+         * 每次放行后向后推进，队列清空也不清除，因此队列曾经空过之后到达的请求同样受间隔约束。
+         */
         private long nextReleaseAt = Long.MIN_VALUE;
         private ScheduledFuture<?> task;
         private long taskAt = Long.MIN_VALUE;
@@ -258,6 +307,7 @@ public final class SiteThrottleScheduler implements SendGate {
                 target = Math.min(target, request.readyAt);
             }
             if (!queue.isEmpty()) {
+                // 就绪队列要同时满足冷却与发送截止时间；队列为空时截止时刻无需唤醒。
                 target = Math.min(target, Math.max(cooldownUntil, nextReleaseAt));
             }
             return target;
