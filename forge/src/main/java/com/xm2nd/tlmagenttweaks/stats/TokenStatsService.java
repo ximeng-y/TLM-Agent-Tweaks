@@ -7,14 +7,18 @@ import com.xm2nd.tlmagenttweaks.Config;
 import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
 import com.xm2nd.tlmagenttweaks.common.Price4;
 import com.xm2nd.tlmagenttweaks.common.PriceTable;
+import com.xm2nd.tlmagenttweaks.common.TokenRequestContext;
 import com.xm2nd.tlmagenttweaks.common.TokenStatsStore;
 import com.xm2nd.tlmagenttweaks.common.TokenUsageParser;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.Level;
 import net.minecraftforge.fml.loading.FMLPaths;
 
 import java.io.IOException;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.UUID;
 
@@ -46,7 +50,13 @@ public final class TokenStatsService {
 
     /** 统计记录中的 ownerName 可能为空；优先使用服务器掌握的真实玩家名。 */
     public static String playerName(MinecraftServer server, String uuid, String recordedName) {
-        UUID id = UUID.fromString(uuid);
+        UUID id;
+        try {
+            id = UUID.fromString(uuid);
+        } catch (IllegalArgumentException e) {
+            // 历史坏 ID：不解析 UUID、不查询服务器玩家列表，只回退历史名或原始 ID
+            return recordedName == null || recordedName.isBlank() ? uuid : recordedName;
+        }
         var online = server.getPlayerList().getPlayer(id);
         if (online != null) {
             return online.getGameProfile().getName();
@@ -117,11 +127,68 @@ public final class TokenStatsService {
     // ---------- 记账 ----------
 
     /**
+     * 发送前捕获统计归因快照（请求冻结之后、实际发送之前调用）。
+     * 统计开关与摘要开关不在捕获阶段判断，保持它们在响应阶段生效的现有行为。
+     * 捕获失败返回 {@code null}，不中断聊天；日志不得包含请求正文与鉴权信息。
+     */
+    public static TokenRequestContext captureRequest(LLMCallback callback, LLMOpenAISite site, byte[] requestBody) {
+        try {
+            if (callback == null || site == null) {
+                return null;
+            }
+            EntityMaid maid = callback.getMaid();
+            if (maid == null) {
+                return null;
+            }
+            UUID owner = maid.getOwnerUUID();
+            if (owner == null) {
+                return null;
+            }
+            String siteId = site.id();
+            if (siteId == null || siteId.isBlank()) {
+                return null;
+            }
+            String model = requestBodyModel(requestBody);
+            if (model == null || model.isBlank()) {
+                return null;
+            }
+            String ownerName = maid.getAiChatManager().ownerName;
+            return new TokenRequestContext(owner.toString(), ownerName, siteId, model, isSummaryCallback(callback));
+        } catch (Throwable t) {
+            TlmAgentTweaks.LOGGER.warn("统计归因快照捕获失败（已忽略）", t);
+            return null;
+        }
+    }
+
+    /** 按实际请求正文读取顶层字符串 model；不回退读取女仆当前模型 */
+    private static String requestBodyModel(byte[] requestBody) {
+        if (requestBody == null || requestBody.length == 0) {
+            return null;
+        }
+        try {
+            JsonElement element = JsonParser.parseString(new String(requestBody, StandardCharsets.UTF_8));
+            if (element.isJsonObject()) {
+                JsonElement model = element.getAsJsonObject().get("model");
+                if (model != null && model.isJsonPrimitive()) {
+                    return model.getAsString();
+                }
+            }
+        } catch (RuntimeException e) {
+            // 正文不是合法 JSON 或字段缺失：无法归因，交由调用方跳过统计
+            return null;
+        }
+        return null;
+    }
+
+    /**
      * LLM 响应记账入口（由 LLMOpenAIClientMixin 在响应处理头部调用，位于 HTTP 回调线程）。
+     * 只按发送前捕获的快照归因；无快照时跳过统计，不回退读取响应时刻的女仆状态。
      * 任何异常都不上抛，绝不影响 TLM 原生聊天流程。
      */
-    public static void onLlmResponse(LLMCallback callback, LLMOpenAISite site,
-                                     HttpResponse<String> response, Throwable throwable) {
+    public static void onHttpResponse(TokenRequestContext context, HttpResponse<String> response, Throwable throwable) {
+        if (context == null) {
+            return;
+        }
         if (!Config.STATS_ENABLED.get()) {
             return;
         }
@@ -136,20 +203,10 @@ public final class TokenStatsService {
         if (usage == null) {
             return;
         }
-        if (!Config.STATS_RECORD_SUMMARY_CALLS.get() && isSummaryCallback(callback)) {
+        if (!Config.STATS_RECORD_SUMMARY_CALLS.get() && context.summaryCall()) {
             return;
         }
-        EntityMaid maid = callback.getMaid();
-        if (maid == null) {
-            return;
-        }
-        UUID owner = maid.getOwnerUUID();
-        if (owner == null) {
-            return;
-        }
-        String ownerName = maid.getAiChatManager().ownerName;
-        String model = maid.getAiChatManager().getLLMModel();
-        STORE.record(owner.toString(), ownerName, site.id(), model,
+        STORE.record(context.ownerUuid(), context.ownerName(), context.siteId(), context.model(),
                 usage.inputOnly(), usage.completionTokens(), usage.cacheRead(), usage.cacheWrite(),
                 System.currentTimeMillis());
     }

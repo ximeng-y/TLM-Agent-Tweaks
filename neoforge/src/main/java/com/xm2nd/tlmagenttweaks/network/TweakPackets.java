@@ -107,16 +107,24 @@ public final class TweakPackets {
                             ranking, null, 0, List.of()));
                 }
                 case RequestTokenStatsPayload.VIEW_PLAYER_DETAIL -> {
-                    UUID playerId;
-                    try {
-                        playerId = UUID.fromString(payload.param());
-                    } catch (IllegalArgumentException exception) {
-                        TlmAgentTweaks.LOGGER.warn("拒绝来自 {} 的非法玩家 UUID 统计请求",
-                                serverPlayer.getGameProfile().getName());
-                        return;
+                    String queryId;
+                    if (store.containsPlayer(payload.param())) {
+                        // 排行/下拉框会回传存档中的原始 ID（含历史坏 UUID），直接放行查询
+                        queryId = payload.param();
+                    } else {
+                        UUID playerId;
+                        try {
+                            playerId = UUID.fromString(payload.param());
+                        } catch (IllegalArgumentException exception) {
+                            TlmAgentTweaks.LOGGER.warn("拒绝来自 {} 的非法玩家 UUID 统计请求",
+                                    serverPlayer.getGameProfile().getName());
+                            return;
+                        }
+                        // 原始 ID 不存在但参数合法：保持按规范化后的 UUID 查询
+                        queryId = playerId.toString();
                     }
                     TokenStatsStore.PlayerDetail detail =
-                            store.playerDetail(playerId.toString(), TokenStatsService.prices());
+                            store.playerDetail(queryId, TokenStatsService.prices());
                     TokenStatsStore.PlayerSummary s = detail.summary();
                     context.reply(new TokenStatsDataPayload(RequestTokenStatsPayload.VIEW_PLAYER_DETAIL,
                             List.of(),
