@@ -31,10 +31,6 @@ public final class ProtocolStreamHub {
         SUBSCRIBERS.remove(subscriber);
     }
 
-    public static int subscriberCount() {
-        return SUBSCRIBERS.size();
-    }
-
     public static void onEvent(ProtocolStreamListener.ProtocolStreamContext context,
                                String requestId, StreamEventType type, String text) {
         if (SUBSCRIBERS.isEmpty() || context == null) {
