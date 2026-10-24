@@ -45,7 +45,6 @@ public final class SiteThrottleScheduler implements SendGate {
     private final ScheduledExecutorService scheduler;
     private final Object lock = new Object();
     private final Map<String, SiteState> sites = new HashMap<>();
-    private boolean stopped;
 
     public SiteThrottleScheduler(Duration spacing, Duration retryDelay) {
         this.spacingNanos = Math.max(0L, Objects.requireNonNull(spacing, "spacing").toNanos());
@@ -67,27 +66,19 @@ public final class SiteThrottleScheduler implements SendGate {
     public Handle submit(String siteId, long waitForNanos, Send send) {
         Objects.requireNonNull(send, "send");
         Request request = new Request(siteId, waitForNanos, send);
-        Runnable discarded = null;
         synchronized (lock) {
-            if (stopped) {
-                discarded = request.discard();
+            SiteState site = site(request.siteId);
+            long now = System.nanoTime();
+            if (request.readyAt <= now) {
+                site.queue.addLast(request);
             } else {
-                SiteState site = site(request.siteId);
-                long now = System.nanoTime();
-                if (request.readyAt <= now) {
-                    site.queue.addLast(request);
-                } else {
-                    // List 的 addLast 是 JDK 21 的 SequencedCollection 才有的方法，
-                    // common 源码要同时被 Java 17 的 forge 薄壳编译，这里用 add
-                    site.waiting.add(request);
-                }
-                // 放行只在调度线程上发生：这里只登记，并让调度线程立刻按最新时序处理一次
-                // （放行条件未满足时该次处理只补发排队通知并改排到真正的允许时刻）。
-                schedule(site, now, now);
+                // List 的 addLast 是 JDK 21 的 SequencedCollection 才有的方法，
+                // common 源码要同时被 Java 17 的 forge 薄壳编译，这里用 add
+                site.waiting.add(request);
             }
-        }
-        if (discarded != null) {
-            runOne(discarded);
+            // 放行只在调度线程上发生：这里只登记，并让调度线程立刻按最新时序处理一次
+            // （放行条件未满足时该次处理只补发排队通知并改排到真正的允许时刻）。
+            schedule(site, now, now);
         }
         return request;
     }
@@ -159,7 +150,7 @@ public final class SiteThrottleScheduler implements SendGate {
         Runnable granted;
         List<Runnable> notices;
         synchronized (lock) {
-            if (stopped || sites.get(site.siteId) != site) {
+            if (sites.get(site.siteId) != site) {
                 return;
             }
             site.task = null;

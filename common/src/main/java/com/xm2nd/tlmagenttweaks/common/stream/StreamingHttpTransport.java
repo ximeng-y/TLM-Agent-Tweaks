@@ -67,7 +67,7 @@ public final class StreamingHttpTransport {
     private static final Duration DEFAULT_PHASE_TIMEOUT = Duration.ofSeconds(60);
     private static final Duration MAX_PHASE_TIMEOUT = Duration.ofSeconds(90);
     private static final int READ_BUFFER_BYTES = 8192;
-    /** 交回调用方的错误正文上限，避免整个错误页进入日志与聊天栏。 */
+    /** 错误正文的读取与上报上限，避免整个错误页进入内存、日志与聊天栏。 */
     private static final int MAX_ERROR_BODY_CHARS = 4096;
 
     private static final ExecutorService READER = Executors.newCachedThreadPool(runnable -> {
@@ -319,7 +319,7 @@ public final class StreamingHttpTransport {
         private final CompletableFuture<HttpResponse<String>> result = new CompletableFuture<>();
         private final List<SendGate.Handle> queueHandles = new CopyOnWriteArrayList<>();
         private final AtomicInteger statusRetries = new AtomicInteger();
-        /** statusRetries 已在 wait 中就绪时置位，保证真正的发送只消耗一次额度。 */
+        /** 仅用于并发决策去重：立即复位，不代表存在跨越等待期的持续预留。 */
         private final AtomicBoolean retryReserved = new AtomicBoolean();
         /** 响应头前断连的流式重发是否已用掉；单点写入，但取消与状态码分支也会读。 */
         private final AtomicBoolean transportRetried = new AtomicBoolean();
@@ -508,7 +508,8 @@ public final class StreamingHttpTransport {
                 current.ensureActive();
                 int status = head.statusCode();
                 if (!isSuccessful(status)) {
-                    String errorBody = readAll(head.body(), deadline, current);
+                    // 错误正文只用于提示、日志与回退判定，读取有硬上限；成功正文仍须完整。
+                    String errorBody = readAll(head.body(), deadline, current, MAX_ERROR_BODY_CHARS);
                     onErrorStatus(current, streaming, head, errorBody);
                     return;
                 }
@@ -673,10 +674,11 @@ public final class StreamingHttpTransport {
         }
 
         /**
-         * 预留一次状态码重试额度。
+         * 状态码重试额度计数：在决定重试的当下立即计入 {@code statusRetries}，
+         * 其后的等待、排队与取消不再回退该计数（取消排队中的重试不返还额度）。
          * <p>
-         * 在等待开始时预留，因此“取消排队中的重试”不会白白消耗一次额度，
-         * 也不会出现同一次尝试被计两次的情况。
+         * {@code retryReserved} 只保证同一时刻的并发决策至多计一次，
+         * 立即复位，不构成持续预留。
          */
         private void reserveRetry() {
             if (retryReserved.compareAndSet(false, true)) {
@@ -779,6 +781,14 @@ public final class StreamingHttpTransport {
         }
 
         private String readAll(InputStream stream, long deadline, Attempt current) throws Exception {
+            return readAll(stream, deadline, current, Integer.MAX_VALUE);
+        }
+
+        /**
+         * 带读取上限的完整读取：达到 {@code maxBytes} 后停止，剩余正文连同连接一并丢弃。
+         * 流仍由 try-with-resources 关闭；字节上限即字符上限的保守上界（UTF-8 每字符至少一字节）。
+         */
+        private String readAll(InputStream stream, long deadline, Attempt current, int maxBytes) throws Exception {
             try (stream) {
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
                 byte[] buffer = new byte[READ_BUFFER_BYTES];
@@ -793,6 +803,9 @@ public final class StreamingHttpTransport {
                     }
                     current.ensureActive();
                     out.write(buffer, 0, read);
+                    if (out.size() >= maxBytes) {
+                        break;
+                    }
                 }
                 return out.toString(StandardCharsets.UTF_8);
             }
