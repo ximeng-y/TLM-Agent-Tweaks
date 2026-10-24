@@ -64,6 +64,8 @@
   "gui.tlm_agent_tweaks.price.no_sites": "暂无可用 LLM 站点（需管理员先配置）",
   "gui.tlm_agent_tweaks.price.bad_number": "价格须为非负数字（留空视为 0）",
   "gui.tlm_agent_tweaks.price.sending": "已发送，等待服务器确认…",
+  "gui.tlm_agent_tweaks.price.loading": "价格表加载中…",
+  "gui.tlm_agent_tweaks.price.denied": "无权限：仅管理员可管理模型价格",
   "gui.tlm_agent_tweaks.price.save_site_model_first": "请先保存站点及当前模型",
 
   "disconnect.tlm_agent_tweaks.missing_server": "无法加入：该服务器未安装 TLM Agent Tweaks（本 mod 需要服务端支持才能工作）",

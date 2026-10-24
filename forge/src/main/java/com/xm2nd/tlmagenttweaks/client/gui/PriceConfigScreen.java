@@ -53,6 +53,8 @@ public class PriceConfigScreen extends Screen {
     /** 用户是否在当前选择下手动编辑过（避免异步到达的价格缓存覆盖输入） */
     private boolean userEdited;
     private long consumedPriceVersion;
+    /** 本次打开后等待响应时的缓存版本；版本未前进且未拒绝说明价格表还在路上 */
+    private long awaitedPriceVersion = -1;
 
     private static final String[] FIELD_KEYS = {
             "gui.tlm_agent_tweaks.price.input",
@@ -70,8 +72,9 @@ public class PriceConfigScreen extends Screen {
 
     @Override
     protected void init() {
-        // 拉取最新价格表（服务端会校验管理员；非管理员仅拿不到回包）
+        // 拉取最新价格表（服务端会校验管理员；非管理员会收到明确的拒绝回包）
         TweakPackets.sendToServer(new RequestPriceTablePayload());
+        this.awaitedPriceVersion = ClientPriceCache.version();
         if (this.font == null) {
             return;
         }
@@ -158,7 +161,8 @@ public class PriceConfigScreen extends Screen {
     }
 
     private void updateButtons() {
-        boolean available = isModelAvailable();
+        // 无权限时禁止保存/清除（服务端也会二次鉴权拒绝）
+        boolean available = isModelAvailable() && !ClientPriceCache.isDenied();
         if (this.saveButton != null) {
             this.saveButton.active = available;
         }
@@ -258,11 +262,19 @@ public class PriceConfigScreen extends Screen {
                     this.panelLeft + CONTENT_MARGIN, this.panelTop + 88 + i * ROW_HEIGHT + 3, 0xFF777777);
         }
 
-        // 未保存站点/模型时持续提示；否则显示 2 秒临时状态
+        // 未保存站点/模型时持续提示；无权限持续提示；价格表未回来时显示加载中；否则显示 2 秒临时状态
         if (!isModelAvailable()) {
             graphics.drawCenteredString(this.font,
                     Component.translatable("gui.tlm_agent_tweaks.price.save_site_model_first"),
                     this.width / 2, this.panelTop + 178, 0xFFFF7777);
+        } else if (ClientPriceCache.isDenied()) {
+            graphics.drawCenteredString(this.font,
+                    Component.translatable("gui.tlm_agent_tweaks.price.denied"),
+                    this.width / 2, this.panelTop + 178, 0xFFFF7777);
+        } else if (ClientPriceCache.version() == this.awaitedPriceVersion) {
+            graphics.drawCenteredString(this.font,
+                    Component.translatable("gui.tlm_agent_tweaks.price.loading"),
+                    this.width / 2, this.panelTop + 178, 0xFF777777);
         } else if (System.currentTimeMillis() - this.statusTimestamp < 2000) {
             graphics.drawCenteredString(this.font, this.statusMessage,
                     this.width / 2, this.panelTop + 178, 0xFFFF7777);

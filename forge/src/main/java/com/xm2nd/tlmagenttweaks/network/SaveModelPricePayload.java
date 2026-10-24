@@ -16,6 +16,14 @@ import net.minecraft.resources.ResourceLocation;
 public record SaveModelPricePayload(String siteId, String model, String currency,
                                     double[] values, boolean clear) {
 
+    public SaveModelPricePayload {
+        // 编解码对称约束：非清除时必须恰好四个价格（输入/输出/缓存命中/缓存写入）。
+        // 编码按数组长度写、解码固定读四，违反长度的记录无法构造，异常长度在解码层即被拒绝。
+        if (!clear && values.length != 4) {
+            throw new IllegalArgumentException("价格载荷非清除时必须为 4 个值，实际 " + values.length);
+        }
+    }
+
     public static final ResourceLocation ID =
             ResourceLocation.fromNamespaceAndPath(TlmAgentTweaks.MOD_ID, "save_price");
 

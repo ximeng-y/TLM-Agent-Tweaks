@@ -4,6 +4,7 @@ import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.xm2nd.tlmagenttweaks.client.thinking.ThinkingDisplayCache;
 import com.xm2nd.tlmagenttweaks.network.CompressHistoryResultPayload;
 import com.xm2nd.tlmagenttweaks.network.CompressHistoryStatePayload;
+import com.xm2nd.tlmagenttweaks.network.PriceDeniedPayload;
 import com.xm2nd.tlmagenttweaks.network.PriceTablePayload;
 import com.xm2nd.tlmagenttweaks.network.ThinkingDisplayPayload;
 import com.xm2nd.tlmagenttweaks.network.TokenStatsDataPayload;
@@ -65,6 +66,10 @@ public final class ClientPacketHandlers {
 
     public static void onPriceTable(PriceTablePayload payload) {
         ClientPriceCache.accept(payload);
+    }
+
+    public static void onPriceDenied(PriceDeniedPayload payload) {
+        ClientPriceCache.markDenied();
     }
 
     public static void onThinkingDisplay(ThinkingDisplayPayload payload) {
