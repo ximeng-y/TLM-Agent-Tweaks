@@ -3,13 +3,18 @@ package com.xm2nd.tlmagenttweaks.network;
 import com.github.tartaricacid.touhoulittlemaid.ai.manager.site.AvailableSites;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.LLMSite;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.LLMOpenAISite;
+import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
 import com.xm2nd.tlmagenttweaks.client.ClientPacketHandlers;
 import com.xm2nd.tlmagenttweaks.common.GranularityUtil;
 import com.xm2nd.tlmagenttweaks.common.Price4;
 import com.xm2nd.tlmagenttweaks.common.PriceTable;
 import com.xm2nd.tlmagenttweaks.common.TokenStatsStore;
+import com.xm2nd.tlmagenttweaks.common.thinking.ModelThinkingConfig;
+import com.xm2nd.tlmagenttweaks.common.thinking.ThinkingLevel;
 import com.xm2nd.tlmagenttweaks.compress.ManualCompressService;
+import com.xm2nd.tlmagenttweaks.protocol.MaidThinkingChoiceStore;
+import com.xm2nd.tlmagenttweaks.protocol.ProtocolLLMSite;
 import com.xm2nd.tlmagenttweaks.stats.TokenStatsService;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
@@ -20,7 +25,9 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 import java.time.LocalDate;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -65,6 +72,13 @@ public final class TweakPackets {
         // 思考链展示快照：新增的 optional S2C 通道，不支持它的客户端照常进服（不接收即可）
         registrar.playToClient(ThinkingDisplayPayload.TYPE, ThinkingDisplayPayload.STREAM_CODEC,
                 TweakPackets::handleThinkingDisplay);
+        // 思考配置快照与玩家思考选择：与思考链展示一样允许缺失，不影响进服
+        registrar.playToServer(RequestThinkingConfigPayload.TYPE, RequestThinkingConfigPayload.STREAM_CODEC,
+                TweakPackets::handleThinkingConfigRequest);
+        registrar.playToClient(ThinkingConfigPayload.TYPE, ThinkingConfigPayload.STREAM_CODEC,
+                TweakPackets::handleThinkingConfig);
+        registrar.playToServer(SaveThinkingChoicePayload.TYPE, SaveThinkingChoicePayload.STREAM_CODEC,
+                TweakPackets::handleSaveThinkingChoice);
     }
 
     // ---------- 压缩 ----------
@@ -216,5 +230,64 @@ public final class TweakPackets {
 
     private static void handleThinkingDisplay(ThinkingDisplayPayload payload, IPayloadContext context) {
         context.enqueueWork(() -> ClientPacketHandlers.onThinkingDisplay(payload));
+    }
+
+    // ---------- 思考配置与选择 ----------
+
+    private static void handleThinkingConfigRequest(RequestThinkingConfigPayload payload,
+                                                    IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (!(context.player() instanceof ServerPlayer player)) {
+                return;
+            }
+            Map<String, Map<String, ModelThinkingConfig>> snapshot = new LinkedHashMap<>();
+            for (Map.Entry<String, LLMSite> entry : AvailableSites.LLM_SITES.entrySet()) {
+                if (!(entry.getValue() instanceof ProtocolLLMSite protocolSite) || !protocolSite.enabled()) {
+                    continue;
+                }
+                Map<String, ModelThinkingConfig> configs = protocolSite.thinkingConfigs();
+                if (!configs.isEmpty()) {
+                    snapshot.put(entry.getKey(), configs);
+                }
+            }
+            context.reply(new ThinkingConfigPayload(snapshot));
+        });
+    }
+
+    private static void handleThinkingConfig(ThinkingConfigPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> ClientPacketHandlers.onThinkingConfig(payload));
+    }
+
+    private static void handleSaveThinkingChoice(SaveThinkingChoicePayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (!(context.player() instanceof ServerPlayer player)) {
+                return;
+            }
+            if (!(player.level().getEntity(payload.entityId()) instanceof EntityMaid maid) || !maid.isOwnedBy(player)) {
+                return;
+            }
+            // 与价格配置同思路：站点/模型必须是管理员配置过的，选择范围也必须落在配置内
+            if (!(AvailableSites.getLLMSite(payload.siteId()) instanceof ProtocolLLMSite protocolSite)) {
+                return;
+            }
+            ModelThinkingConfig config = protocolSite.thinkingConfigs().get(payload.modelId());
+            if (config == null || !config.configured()) {
+                return;
+            }
+            ThinkingLevel level = ThinkingLevel.fromId(payload.levelId());
+            if (!payload.enabled()) {
+                // 「关闭」是开关提供的选项：不允许开关时不得关闭
+                if (!config.toggleAllowed()) {
+                    return;
+                }
+                MaidThinkingChoiceStore.write(maid, payload.siteId(), payload.modelId(), false, ThinkingLevel.DEFAULT);
+                return;
+            }
+            // 开关未开放时思考隐含开启，只校验强度落在配置内
+            if (level == null || !config.allows(level)) {
+                return;
+            }
+            MaidThinkingChoiceStore.write(maid, payload.siteId(), payload.modelId(), true, level);
+        });
     }
 }

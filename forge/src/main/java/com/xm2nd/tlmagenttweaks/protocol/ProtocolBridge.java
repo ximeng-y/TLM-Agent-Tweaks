@@ -13,6 +13,9 @@ import com.xm2nd.tlmagenttweaks.common.protocol.ProtocolResponseDecoder;
 import com.xm2nd.tlmagenttweaks.common.protocol.ProtocolUrls;
 import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
 import com.xm2nd.tlmagenttweaks.common.protocol.UrlMode;
+import com.xm2nd.tlmagenttweaks.common.thinking.ModelThinkingConfig;
+import com.xm2nd.tlmagenttweaks.common.thinking.ThinkingChoice;
+import com.xm2nd.tlmagenttweaks.common.thinking.ThinkingRequestApplier;
 
 import java.net.URI;
 import java.net.http.HttpRequest;
@@ -29,6 +32,9 @@ public final class ProtocolBridge {
 
     private static final Gson GSON = new Gson();
     private static final Map<LLMCallback, ProtocolException> REQUEST_ERRORS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+    /** 本轮请求是否注入过思考参数：失败侧据此决定是否给出思考设置的预设提示。 */
+    private static final Map<LLMCallback, Boolean> THINKING_APPLIED =
             Collections.synchronizedMap(new WeakHashMap<>());
 
     private ProtocolBridge() {
@@ -49,35 +55,108 @@ public final class ProtocolBridge {
     }
 
     public static LLMOpenAISite withProtocol(LLMOpenAISite site, SiteProtocol protocol, UrlMode urlMode) {
+        return withProtocol(site, protocol, urlMode,
+                site instanceof ProtocolLLMSite protocolSite ? protocolSite.thinkingConfigs() : Map.of());
+    }
+
+    public static LLMOpenAISite withProtocol(LLMOpenAISite site, SiteProtocol protocol, UrlMode urlMode,
+                                             Map<String, ModelThinkingConfig> thinkingConfigs) {
         if (site == null) {
             return null;
         }
         SiteProtocol resolvedProtocol = protocol == null ? protocolOf(site) : protocol;
         UrlMode resolvedMode = urlMode == null ? urlModeOf(site) : urlMode;
+        Map<String, ModelThinkingConfig> resolvedThinking = thinkingConfigs == null
+                ? Map.of() : thinkingConfigs;
         if (site instanceof ProtocolLLMSite protocolSite
                 && protocolSite.protocol() == resolvedProtocol
-                && protocolSite.urlMode() == resolvedMode) {
+                && protocolSite.urlMode() == resolvedMode
+                && protocolSite.thinkingConfigs().equals(resolvedThinking)) {
             return site;
         }
         return new ProtocolLLMSite(site.id(), site.icon(), site.url(), site.enabled(), site.secretKey(),
                 site.hasThinkingField(), Map.copyOf(site.headers()), Map.copyOf(site.modelEntries()),
-                resolvedProtocol, resolvedMode);
+                resolvedProtocol, resolvedMode, resolvedThinking);
     }
 
     public static String encodeBody(LLMOpenAISite site, Gson gson, Object canonicalRequest, LLMCallback callback) {
         String canonicalJson = gson.toJson(canonicalRequest);
         SiteProtocol protocol = protocolOf(site);
+        ThinkingChoice choice = resolveThinkingChoice(site, callback);
         if (protocol == SiteProtocol.CHAT_COMPLETIONS) {
-            return canonicalJson;
+            return choice == null ? canonicalJson : rewriteBody(protocol, canonicalJson, callback, choice);
         }
         try {
             JsonObject canonical = JsonParser.parseString(canonicalJson).getAsJsonObject();
-            return ProtocolRequestEncoder.encodeToString(protocol, canonical, ProtocolMetadataPersistence.store(),
-                    conversationScope(callback, site));
+            String encoded = ProtocolRequestEncoder.encodeToString(protocol, canonical,
+                    ProtocolMetadataPersistence.store(), conversationScope(callback, site));
+            return choice == null ? encoded : rewriteBody(protocol, encoded, callback, choice);
         } catch (ProtocolException | RuntimeException e) {
             failRequest(callback, toProtocolException("Failed to encode LLM request", e));
             // 真正的异常会在 sendAsync redirect 处作为 failedFuture 交给原 handle。
             return "{}";
+        }
+    }
+
+    /**
+     * 汇总该次请求的思考决定：站点没给模型配置思考项、或女仆没做过（仍有效的）选择时返回
+     * {@code null}，请求保持 TLM 原样。
+     */
+    private static ThinkingChoice resolveThinkingChoice(LLMOpenAISite site, LLMCallback callback) {
+        if (!(site instanceof ProtocolLLMSite protocolSite) || callback == null
+                || callback.getMaid() == null) {
+            return null;
+        }
+        String model = callback.getMaid().getAiChatManager().getLLMModel();
+        ModelThinkingConfig config = protocolSite.thinkingConfigs().get(model);
+        if (config == null || !config.configured()) {
+            return null;
+        }
+        MaidThinkingChoiceStore.Stored stored = MaidThinkingChoiceStore.read(callback.getMaid());
+        if (stored == null || !stored.siteId().equals(site.id()) || !stored.modelId().equals(model)) {
+            return null;
+        }
+        ThinkingChoice choice = stored.choice();
+        // 关闭思考是开关提供的选项：不允许开关时「关闭」无从谈起
+        if (!choice.enabled() && !config.toggleAllowed()) {
+            return null;
+        }
+        // 强度必须落在管理员配置内；开关未开放时思考隐含开启，只看强度合法性
+        if (choice.enabled() && !config.allows(choice.level())) {
+            return null;
+        }
+        return choice;
+    }
+
+    /**
+     * 把思考决定写进最终请求体；写入成功时登记标记，供失败侧的预设提示判定使用。
+     */
+    private static String rewriteBody(SiteProtocol protocol, String json, LLMCallback callback,
+                                      ThinkingChoice choice) {
+        try {
+            JsonObject body = JsonParser.parseString(json).getAsJsonObject();
+            if (!ThinkingRequestApplier.apply(protocol, body, choice)) {
+                return json;
+            }
+            synchronized (THINKING_APPLIED) {
+                THINKING_APPLIED.put(callback, Boolean.TRUE);
+            }
+            return GSON.toJson(body);
+        } catch (RuntimeException e) {
+            // 思考注入失败不阻断请求，保持编码器产物原样发出。
+            return json;
+        }
+    }
+
+    /**
+     * 本轮请求是否注入过思考参数；只读不清理，回调对象被回收后条目随之失效。
+     */
+    public static boolean thinkingApplied(LLMCallback callback) {
+        if (callback == null) {
+            return false;
+        }
+        synchronized (THINKING_APPLIED) {
+            return THINKING_APPLIED.containsKey(callback);
         }
     }
 

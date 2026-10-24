@@ -4,9 +4,12 @@ import com.github.tartaricacid.touhoulittlemaid.ai.manager.entity.LLMCallback;
 import com.github.tartaricacid.touhoulittlemaid.ai.manager.response.ResponseChat;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.LLMClient;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.response.ToolCall;
+import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.xm2nd.tlmagenttweaks.protocol.stream.ProtocolHttpBridge;
+import com.xm2nd.tlmagenttweaks.protocol.stream.ThinkingFailureNotice;
 import com.xm2nd.tlmagenttweaks.thinking.ThinkingDisplayService;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -38,6 +41,12 @@ import java.util.concurrent.CompletableFuture;
 @Mixin(value = LLMCallback.class, remap = false)
 public abstract class LLMCallbackMixin {
 
+    @Shadow
+    protected EntityMaid maid;
+
+    @Shadow
+    protected long waitingChatBubbleId;
+
     /** 对话正常结束（写历史、给气泡、播报均在其后由 TLM 完成）。 */
     @Inject(method = "onSuccess", at = @At("HEAD"), cancellable = true)
     private void tlmAgentTweaks$endConversation(ResponseChat responseChat, CallbackInfo ci) {
@@ -60,6 +69,9 @@ public abstract class LLMCallbackMixin {
      * 整轮超时只允许主动发出的那一次失败进入父类；其余迟到失败一律丢弃。
      * 显式取消后的父类失败也被静默截断，不显示红字。
      * 父类这里的许可检查不消耗许可——唯一一次超时派发结束后由超时收尾关闭。
+     * <p>
+     * 「上游拒绝思考参数」类失败改用预设提示替换原始英文报错（issue #3），
+     * 等待气泡的清理由预设提示自己完成。
      */
     @Inject(method = "onFailure", at = @At("HEAD"), cancellable = true)
     private void tlmAgentTweaks$endConversationOnFailure(HttpRequest request, Throwable throwable,
@@ -70,6 +82,13 @@ public abstract class LLMCallbackMixin {
         }
         if (ProtocolHttpBridge.wasTimedOut((LLMCallback) (Object) this)
                 && !ProtocolHttpBridge.acceptFailure((LLMCallback) (Object) this, throwable)) {
+            ci.cancel();
+            return;
+        }
+        if (ThinkingFailureNotice.shouldIntercept((LLMCallback) (Object) this, throwable)) {
+            ProtocolHttpBridge.tryFinish((LLMCallback) (Object) this);
+            ThinkingFailureNotice.notify((LLMCallback) (Object) this,
+                    this.maid, this.waitingChatBubbleId, throwable);
             ci.cancel();
             return;
         }
