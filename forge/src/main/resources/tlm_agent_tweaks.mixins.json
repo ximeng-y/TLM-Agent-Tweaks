@@ -7,7 +7,8 @@
   "mixins": [
     "LLMOpenAIClientMixin",
     "LLMCallbackMixin",
-    "HistorySummaryManagerInvoker"
+    "HistorySummaryManagerInvoker",
+    "HistorySummaryResultMixin"
   ],
   "client": [
     "HistoryAIChatScreenMixin",

@@ -75,6 +75,7 @@
   "message.tlm_agent_tweaks.compress.fail.not_enough_messages": "Not enough compressible messages (%s now, at least %s required), keep chatting first",
   "message.tlm_agent_tweaks.compress.fail.site_invalid": "LLM site or model is not configured, cannot compress",
   "message.tlm_agent_tweaks.compress.fail.compress_failed": "Compression failed (LLM error), try again later",
+  "message.tlm_agent_tweaks.compress.fail.invalidated": "AI data was cleared during compression; this compression was invalidated, please start a new one",
   "message.tlm_agent_tweaks.stats.denied": "Only admins can view token stats",
   "message.tlm_agent_tweaks.price.saved": "Price saved for model %s",
   "message.tlm_agent_tweaks.price.cleared": "Price cleared for model %s",
