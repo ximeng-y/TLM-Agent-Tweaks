@@ -2,9 +2,11 @@ package com.xm2nd.tlmagenttweaks.client.gui;
 
 import com.github.tartaricacid.touhoulittlemaid.client.gui.widget.button.FlatColorButton;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
+import com.xm2nd.tlmagenttweaks.client.ClientThinkingConfigCache;
 import com.xm2nd.tlmagenttweaks.common.thinking.ModelThinkingConfig;
 import com.xm2nd.tlmagenttweaks.common.thinking.ThinkingLevel;
 import com.xm2nd.tlmagenttweaks.network.SaveThinkingChoicePayload;
+import com.xm2nd.tlmagenttweaks.network.ThinkingConfigPayload;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Renderable;
 import net.minecraft.client.gui.screens.Screen;
@@ -59,6 +61,16 @@ public class ThinkingPlayerScreen extends Screen {
         this.config = config == null ? ModelThinkingConfig.unconfigured() : config;
         // 默认开（issue #3）；管理员不允许开关思考时本就不显示开关区，思考隐含开启
         this.thinkingEnabled = true;
+        // 回显女仆已存的思考选择（随配置快照同步）：站点/模型与当前不一致时不回显，
+        // 已存强度不在配置范围内时回落 default，「关闭」也只在开关可用时回显
+        ThinkingConfigPayload.CurrentChoice stored = ClientThinkingConfigCache.current(this.maid.getId());
+        if (stored != null && stored.siteId().equals(this.siteId) && stored.modelId().equals(this.modelId)) {
+            this.thinkingEnabled = stored.enabled() && this.config.toggleAllowed();
+            ThinkingLevel storedLevel = ThinkingLevel.fromId(stored.levelId());
+            if (this.thinkingEnabled && this.config.allows(storedLevel)) {
+                this.selectedLevel = storedLevel;
+            }
+        }
     }
 
     @Override
@@ -144,6 +156,9 @@ public class ThinkingPlayerScreen extends Screen {
     private void confirm() {
         ThinkingLevel level = this.thinkingEnabled ? this.selectedLevel : ThinkingLevel.DEFAULT;
         TweakPackets.sendToServer(new SaveThinkingChoicePayload(
+                this.maid.getId(), this.siteId, this.modelId, this.thinkingEnabled, level.id()));
+        // 本地同步更新缓存：同一界面会话内再次打开选择屏时按最新选择回显，下次快照到达后仍以服务端为准
+        ClientThinkingConfigCache.acceptCurrent(new ThinkingConfigPayload.CurrentChoice(
                 this.maid.getId(), this.siteId, this.modelId, this.thinkingEnabled, level.id()));
         this.onClose();
     }

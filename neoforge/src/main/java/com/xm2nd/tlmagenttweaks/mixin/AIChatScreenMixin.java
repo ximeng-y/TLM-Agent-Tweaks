@@ -1,7 +1,6 @@
 package com.xm2nd.tlmagenttweaks.mixin;
 
 import com.github.tartaricacid.touhoulittlemaid.ai.manager.entity.MaidAIChatManager;
-import com.github.tartaricacid.touhoulittlemaid.ai.manager.entity.MaidAIChatSerializable;
 import com.github.tartaricacid.touhoulittlemaid.client.gui.entity.maid.ai.AIChatScreen;
 import com.github.tartaricacid.touhoulittlemaid.client.gui.widget.button.FlatColorButton;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
@@ -73,19 +72,24 @@ public abstract class AIChatScreenMixin {
                 .setTooltips(tooltipKey);
         tlmAgentTweaks$addWidgetReflect(screen, button);
 
-        // 每次打开聊天界面刷新一次思考配置快照；服务端站点配置变更后重开即生效
-        PacketDistributor.sendToServer(new RequestThinkingConfigPayload());
+        // 每次打开聊天界面刷新一次思考配置快照（附带当前女仆，服务端回带其已存思考选择）；
+        // 服务端站点配置变更后重开即生效
+        PacketDistributor.sendToServer(new RequestThinkingConfigPayload(this.maid.getId()));
     }
 
     /**
      * 标记本次 applyPopupSelection 走到了 LLM 分支，并照原样完成赋值。
      * TTS/LANGUAGE 分支不写 llmModel，因此不会误弹思考选择。
+     * <p>
+     * target 的 owner 必须写 {@code MaidAIChatManager}（接收者静态类型）而非字段声明类
+     * {@code MaidAIChatSerializable}：javac 对继承字段的访问以接收者静态类型生成字段指令
+     * owner，写声明类会导致 mixin 匹配不到指令、应用失败，打开 AI 聊天界面即崩溃。
      */
     @Redirect(method = "applyPopupSelection", at = @At(value = "FIELD",
-            target = "Lcom/github/tartaricacid/touhoulittlemaid/ai/manager/entity/MaidAIChatSerializable;"
+            target = "Lcom/github/tartaricacid/touhoulittlemaid/ai/manager/entity/MaidAIChatManager;"
                     + "llmModel:Ljava/lang/String;", opcode = Opcodes.PUTFIELD),
             remap = false)
-    private void tlmAgentTweaks$markLlmModelWrite(MaidAIChatSerializable manager, String value) {
+    private void tlmAgentTweaks$markLlmModelWrite(MaidAIChatManager manager, String value) {
         this.tlmAgentTweaks$llmModelClicked = true;
         manager.llmModel = value;
     }

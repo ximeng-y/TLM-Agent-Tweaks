@@ -19,8 +19,18 @@ import java.util.Set;
  * <p>
  * 结构：siteId → modelId → {可开关思考, 允许的思考强度位掩码}。
  * 只含配置过的模型，玩家侧据此决定点击模型名后是否展开思考选择。
+ *
+ * @param current 请求所带女仆当前已存的思考选择；无效或没有时为 null，供选择屏回显
  */
-public record ThinkingConfigPayload(Map<String, Map<String, ModelThinkingConfig>> configs) implements CustomPacketPayload {
+public record ThinkingConfigPayload(Map<String, Map<String, ModelThinkingConfig>> configs,
+                                    CurrentChoice current) implements CustomPacketPayload {
+
+    /**
+     * 女仆已存的思考选择快照；levelId 原样透传，由客户端解析并做范围校验。
+     */
+    public record CurrentChoice(int entityId, String siteId, String modelId,
+                                boolean enabled, String levelId) {
+    }
 
     public static final Type<ThinkingConfigPayload> TYPE =
             new Type<>(ResourceLocation.fromNamespaceAndPath(TlmAgentTweaks.MOD_ID, "thinking_config"));
@@ -41,7 +51,7 @@ public record ThinkingConfigPayload(Map<String, Map<String, ModelThinkingConfig>
                 }
                 configs.put(siteId, byModel);
             }
-            return new ThinkingConfigPayload(configs);
+            return new ThinkingConfigPayload(configs, decodeCurrent(friendly));
         }
 
         @Override
@@ -56,8 +66,28 @@ public record ThinkingConfigPayload(Map<String, Map<String, ModelThinkingConfig>
                     encodeConfig(friendly, config);
                 });
             });
+            encodeCurrent(friendly, payload.current());
         }
     };
+
+    private static void encodeCurrent(FriendlyByteBuf buf, CurrentChoice current) {
+        buf.writeBoolean(current != null);
+        if (current != null) {
+            buf.writeInt(current.entityId());
+            buf.writeUtf(current.siteId());
+            buf.writeUtf(current.modelId());
+            buf.writeBoolean(current.enabled());
+            buf.writeUtf(current.levelId());
+        }
+    }
+
+    private static CurrentChoice decodeCurrent(FriendlyByteBuf buf) {
+        if (!buf.readBoolean()) {
+            return null;
+        }
+        return new CurrentChoice(buf.readInt(), buf.readUtf(), buf.readUtf(),
+                buf.readBoolean(), buf.readUtf());
+    }
 
     private static void encodeConfig(FriendlyByteBuf buf, ModelThinkingConfig config) {
         buf.writeBoolean(config.toggleAllowed());

@@ -25,7 +25,8 @@ public final class ThinkingRequestApplier {
     }
 
     /**
-     * 就地修改请求体。返回是否写入了思考参数；false 表示没有可写内容（调用方保留原请求）。
+     * 就地修改请求体。返回是否写入了思考参数；false 表示没有可写内容，
+     * 但上方对遗留字段的清除仍然生效（调用方统一序列化改写后的 body）。
      */
     public static boolean apply(SiteProtocol protocol, JsonObject body, ThinkingChoice choice) {
         if (protocol == null || body == null || choice == null) {

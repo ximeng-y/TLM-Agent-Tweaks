@@ -4,6 +4,7 @@ import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.LLMSite;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.LLMOpenAISite;
 import com.github.tartaricacid.touhoulittlemaid.client.gui.entity.maid.ai.editor.LLMSiteEditorScreen;
 import com.github.tartaricacid.touhoulittlemaid.client.gui.widget.button.FlatColorButton;
+import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
 import com.xm2nd.tlmagenttweaks.client.gui.LLMSiteProtocolScreen;
 import com.xm2nd.tlmagenttweaks.client.gui.PriceConfigScreen;
 import com.xm2nd.tlmagenttweaks.client.gui.ThinkingConfigScreen;
@@ -26,10 +27,15 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 在 TLM 的 LLM 站点编辑器中注入站点协议、单模型价格与思考配置三个入口。
@@ -179,7 +185,57 @@ public abstract class LLMSiteEditorScreenMixin extends Screen {
         if (built instanceof LLMOpenAISite openAiSite) {
             cir.setReturnValue(ProtocolBridge.withProtocol(openAiSite,
                     this.tlmAgentTweaks$protocol, this.tlmAgentTweaks$urlMode,
-                    Map.copyOf(this.tlmAgentTweaks$thinkingConfigs)));
+                    tlmAgentTweaks$filterThinkingConfigs()));
+        }
+    }
+
+    /**
+     * buildSite 时按当前模型行文本过滤思考配置：模型改名后旧键不再随站点持久化。
+     * 过滤只作用于本次写回的副本，不动界面暂存，编辑器内把名字改回来配置仍在。
+     */
+    @Unique
+    private Map<String, ModelThinkingConfig> tlmAgentTweaks$filterThinkingConfigs() {
+        Map<String, ModelThinkingConfig> configs = this.tlmAgentTweaks$thinkingConfigs;
+        if (configs.isEmpty()) {
+            return configs;
+        }
+        Set<String> rowTexts = tlmAgentTweaks$currentRowModelTexts();
+        if (rowTexts == null) {
+            return configs;
+        }
+        Map<String, ModelThinkingConfig> filtered = new LinkedHashMap<>();
+        for (Map.Entry<String, ModelThinkingConfig> entry : configs.entrySet()) {
+            if (rowTexts.contains(entry.getKey())) {
+                filtered.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return filtered;
+    }
+
+    /**
+     * 收集当前全部模型行的文本（含滚动隐藏行，与 buildSite 的取值范围一致；键做 trim，
+     * 与 thinkingConfigs 的写入键一致）。ModelRow 是 TLM 的私有嵌套类且不在重映射集里，
+     * 字符串反射在 dev/prod 均稳定；反射失败返回 null，调用方跳过过滤保持原有行为。
+     */
+    @Unique
+    private Set<String> tlmAgentTweaks$currentRowModelTexts() {
+        try {
+            Field rowsField = LLMSiteEditorScreen.class.getDeclaredField("modelRows");
+            rowsField.setAccessible(true);
+            List<?> modelRows = (List<?>) rowsField.get(this);
+            Method nameMethod = modelRows.isEmpty() ? null
+                    : modelRows.get(0).getClass().getDeclaredMethod("name");
+            Set<String> texts = new HashSet<>();
+            for (Object row : modelRows) {
+                String value = (String) nameMethod.invoke(row);
+                if (value != null && !value.isBlank()) {
+                    texts.add(value.trim());
+                }
+            }
+            return texts;
+        } catch (ReflectiveOperationException e) {
+            TlmAgentTweaks.LOGGER.warn("Failed to read model rows from LLMSiteEditorScreen", e);
+            return null;
         }
     }
 

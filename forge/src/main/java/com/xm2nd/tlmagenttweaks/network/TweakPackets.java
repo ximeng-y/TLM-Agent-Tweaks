@@ -384,7 +384,24 @@ public final class TweakPackets {
                 snapshot.put(entry.getKey(), configs);
             }
         }
-        reply(new ThinkingConfigPayload(snapshot), context);
+        reply(new ThinkingConfigPayload(snapshot,
+                currentThinkingChoice(player, payload.entityId())), context);
+    }
+
+    /**
+     * 读取请求所带女仆已存的思考选择，供玩家侧选择屏回显；
+     * 实体不存在、不归属该玩家或没有有效记录时返回 null。
+     */
+    private static ThinkingConfigPayload.CurrentChoice currentThinkingChoice(ServerPlayer player, int entityId) {
+        if (!(player.level().getEntity(entityId) instanceof EntityMaid maid) || !maid.isOwnedBy(player)) {
+            return null;
+        }
+        MaidThinkingChoiceStore.Stored stored = MaidThinkingChoiceStore.read(maid);
+        if (stored == null) {
+            return null;
+        }
+        return new ThinkingConfigPayload.CurrentChoice(entityId, stored.siteId(), stored.modelId(),
+                stored.choice().enabled(), stored.choice().level().id());
     }
 
     private static void handleThinkingConfig(ThinkingConfigPayload payload, Supplier<NetworkEvent.Context> ctx) {

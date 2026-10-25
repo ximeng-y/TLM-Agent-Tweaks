@@ -74,5 +74,6 @@ public final class ClientPacketHandlers {
 
     public static void onThinkingConfig(ThinkingConfigPayload payload) {
         ClientThinkingConfigCache.accept(payload.configs());
+        ClientThinkingConfigCache.acceptCurrent(payload.current());
     }
 }

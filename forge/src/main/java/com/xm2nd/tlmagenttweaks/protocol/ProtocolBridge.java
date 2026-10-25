@@ -135,12 +135,15 @@ public final class ProtocolBridge {
                                       ThinkingChoice choice) {
         try {
             JsonObject body = JsonParser.parseString(json).getAsJsonObject();
-            if (!ThinkingRequestApplier.apply(protocol, body, choice)) {
-                return json;
+            boolean written = ThinkingRequestApplier.apply(protocol, body, choice);
+            if (written) {
+                synchronized (THINKING_APPLIED) {
+                    THINKING_APPLIED.put(callback, Boolean.TRUE);
+                }
             }
-            synchronized (THINKING_APPLIED) {
-                THINKING_APPLIED.put(callback, Boolean.TRUE);
-            }
+            // apply 返回 false 时遗留字段的清除仍然生效：hasThinkingField 站点上 TLM 会给
+            // 每个请求强制注入 thinking disabled，不得压过玩家的思考选择；无遗留字段时
+            // 重新序列化与原串内容等价。
             return GSON.toJson(body);
         } catch (RuntimeException e) {
             // 思考注入失败不阻断请求，保持编码器产物原样发出。

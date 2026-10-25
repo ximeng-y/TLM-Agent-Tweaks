@@ -23,6 +23,8 @@ class ThinkingRequestApplierTest {
 
     @Test
     void chatOnDefaultClearsLegacyThinkingFieldOnly() {
+        // apply 返回 false 时 ProtocolBridge.rewriteBody 仍会序列化改写后的 body，
+        // 因此这里对 legacy thinking 字段的清除断言即最终线上行为
         JsonObject body = parse("{\"model\":\"m\",\"messages\":[],\"thinking\":{\"type\":\"disabled\"}}");
         assertFalse(ThinkingRequestApplier.apply(SiteProtocol.CHAT_COMPLETIONS, body,
                 new ThinkingChoice(true, ThinkingLevel.DEFAULT)));
