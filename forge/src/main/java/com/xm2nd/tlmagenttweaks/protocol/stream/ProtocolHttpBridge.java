@@ -4,12 +4,15 @@ import com.github.tartaricacid.touhoulittlemaid.ai.manager.entity.LLMCallback;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.ErrorCode;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.ResponseCallback;
 import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
+import com.xm2nd.tlmagenttweaks.common.TokenRequestContext;
+import com.xm2nd.tlmagenttweaks.common.TokenStatsHttpResponse;
 import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
 import com.xm2nd.tlmagenttweaks.common.stream.FrozenRequest;
 import com.xm2nd.tlmagenttweaks.common.stream.RequestRetryPolicy;
 import com.xm2nd.tlmagenttweaks.common.stream.SiteThrottleScheduler;
 import com.xm2nd.tlmagenttweaks.common.stream.StreamingHttpTransport;
 import com.xm2nd.tlmagenttweaks.protocol.ProtocolBridge;
+import com.xm2nd.tlmagenttweaks.stats.TokenStatsService;
 import com.xm2nd.tlmagenttweaks.thinking.ThinkingDisplayService;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraftforge.server.ServerLifecycleHooks;
@@ -84,6 +87,8 @@ public final class ProtocolHttpBridge {
         ThinkingDisplayService.Handle displayHandle = ThinkingDisplayService.beginRequest(callback);
         ProtocolStreamListener listener = new ProtocolStreamListener(site, callback, displayHandle);
         FrozenRequest frozen = FrozenRequest.freeze(request);
+        // 统计归因快照在冻结之后捕获：本次调用的重试与流式回退共享同一份，工具续接的新请求另行捕获。
+        TokenRequestContext statsContext = TokenStatsService.captureRequest(callback, site, frozen.body());
         String siteId = site == null ? null : site.id();
         // 提示器随本次请求的配置快照构造，配置在请求进行中被改动不影响本轮。
         RetryNotifier notifier = new RetryNotifier(callback, policy, displayHandle);
@@ -102,7 +107,12 @@ public final class ProtocolHttpBridge {
             return call.future();
         }
         call.start();
-        return call.future().whenComplete((response, throwable) -> notifier.stopNotifications());
+        CompletableFuture<HttpResponse<String>> future =
+                call.future().whenComplete((response, throwable) -> notifier.stopNotifications());
+        // 无快照时原样返回；异常完成不经过 thenApply，不会被包装
+        return statsContext == null ? future
+                : future.thenApply(response -> response == null ? null
+                        : new TokenStatsHttpResponse(statsContext, response));
     }
 
     public static boolean isInactive(LLMCallback callback) {

@@ -9,6 +9,8 @@ import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.request.Ch
 import com.github.tartaricacid.touhoulittlemaid.ai.service.Client;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.ErrorCode;
 import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
+import com.xm2nd.tlmagenttweaks.common.TokenRequestContext;
+import com.xm2nd.tlmagenttweaks.common.TokenStatsHttpResponse;
 import com.xm2nd.tlmagenttweaks.common.protocol.ProtocolException;
 import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
 import com.xm2nd.tlmagenttweaks.common.stream.HttpStringResponse;
@@ -176,7 +178,10 @@ public abstract class LLMOpenAIClientMixin {
 
     /** 失败提示用对外上报正文（错误响应为截断后的错误页）；非包装响应回退完整正文。 */
     private static String reportedBody(HttpResponse<String> response) {
-        return response instanceof HttpStringResponse http ? http.reportedBody() : response.body();
+        // 统计归因包装在外层，先解包才能看到传输层的可截断正文
+        HttpResponse<String> delegate = response instanceof TokenStatsHttpResponse stats
+                ? stats.delegate() : response;
+        return delegate instanceof HttpStringResponse http ? http.reportedBody() : delegate.body();
     }
 
     @Inject(method = "handle", at = @At("HEAD"), cancellable = true)
@@ -192,25 +197,34 @@ public abstract class LLMOpenAIClientMixin {
             ci.cancel();
             return;
         }
-        boolean successful = throwable == null && response != null
-                && response.statusCode() >= 200 && response.statusCode() < 300;
-        if (successful && !ProtocolBridge.isNormalized(response)) {
+        // 统计包装先解包：协议归一化只识别自己的包装类型，成功状态与归一化一律使用 delegate。
+        TokenRequestContext statsContext = null;
+        HttpResponse<String> delegate = response;
+        if (response instanceof TokenStatsHttpResponse statsResponse) {
+            statsContext = statsResponse.context();
+            delegate = statsResponse.delegate();
+        }
+        boolean successful = throwable == null && delegate != null
+                && delegate.statusCode() >= 200 && delegate.statusCode() < 300;
+        if (successful && !ProtocolBridge.isNormalized(delegate)) {
             try {
-                HttpResponse<String> normalized = ProtocolBridge.normalizeAggregated(this.site, response, callback);
-                if (normalized != response) {
-                    this.handle(callback, normalized, throwable, request);
+                HttpResponse<String> normalized = ProtocolBridge.normalizeAggregated(this.site, delegate, callback);
+                if (normalized != delegate) {
+                    // 归一化返回新响应：用同一快照重新包装后递归进入原 handle，外层不再记账
+                    this.handle(callback, statsContext == null ? normalized
+                            : new TokenStatsHttpResponse(statsContext, normalized), throwable, request);
                     ci.cancel();
                     return;
                 }
             } catch (ProtocolException e) {
-                tlmAgentTweaks$recordUsage(callback, response, throwable);
+                tlmAgentTweaks$recordUsage(statsContext, delegate, throwable);
                 ProtocolHttpBridge.dispatchFailure(callback, request,
                         new Throwable("Protocol response decode failed: " + e.getMessage(), e),
                         ErrorCode.JSON_DECODE_ERROR);
                 ci.cancel();
                 return;
             } catch (Throwable t) {
-                tlmAgentTweaks$recordUsage(callback, response, throwable);
+                tlmAgentTweaks$recordUsage(statsContext, delegate, throwable);
                 ProtocolHttpBridge.dispatchFailure(callback, request,
                         new Throwable("Protocol response decode failed", t),
                         ErrorCode.JSON_DECODE_ERROR);
@@ -218,12 +232,12 @@ public abstract class LLMOpenAIClientMixin {
                 return;
             }
         }
-        tlmAgentTweaks$recordUsage(callback, response, throwable);
+        tlmAgentTweaks$recordUsage(statsContext, delegate, throwable);
     }
 
-    private void tlmAgentTweaks$recordUsage(LLMCallback callback, HttpResponse<String> response, Throwable throwable) {
+    private void tlmAgentTweaks$recordUsage(TokenRequestContext context, HttpResponse<String> response, Throwable throwable) {
         try {
-            TokenStatsService.onLlmResponse(callback, this.site, response, throwable);
+            TokenStatsService.onHttpResponse(context, response, throwable);
         } catch (Throwable t) {
             // 统计绝不能影响聊天流程
             TlmAgentTweaks.LOGGER.warn("token 用量统计记录失败（已忽略）", t);
