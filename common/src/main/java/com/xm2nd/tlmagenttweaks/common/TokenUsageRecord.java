@@ -38,6 +38,17 @@ public class TokenUsageRecord {
         this.model = model;
     }
 
+    /** 复制全部字段的行快照；结果不引用原行对象，供落盘快照在锁外安全序列化 */
+    public TokenUsageRecord copy() {
+        TokenUsageRecord copy = new TokenUsageRecord(day, ownerUuid, ownerName, siteId, model);
+        copy.inputTokens = inputTokens;
+        copy.outputTokens = outputTokens;
+        copy.cacheReadTokens = cacheReadTokens;
+        copy.cacheWriteTokens = cacheWriteTokens;
+        copy.requestCount = requestCount;
+        return copy;
+    }
+
     public void add(long input, long output, long cacheRead, long cacheWrite) {
         this.inputTokens += input;
         this.outputTokens += output;

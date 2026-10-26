@@ -74,7 +74,9 @@ public final class ProtocolResponseDecoder {
         JsonObject choice = new JsonObject();
         choice.addProperty("index", 0);
         choice.add("message", assistantMessage(text.toString(), toolCalls));
-        choice.addProperty("finish_reason", "stop");
+        // Responses 分支只接受 status=completed，不存在长度终止形态；
+        // 工具调用与普通结束按 Chat Completions 语义区分。
+        choice.addProperty("finish_reason", toolCalls.isEmpty() ? "stop" : "tool_calls");
 
         JsonObject body = chatCompletionEnvelope(raw, "created_at", choice);
         JsonObject usage = responsesUsage(raw);
@@ -166,7 +168,7 @@ public final class ProtocolResponseDecoder {
         choice.addProperty("index", 0);
         choice.add("message", assistantMessage(text.toString(), toolCalls));
         if (stopReason != null) {
-            choice.addProperty("finish_reason", stopReason);
+            choice.addProperty("finish_reason", anthropicFinishReason(stopReason));
         }
 
         JsonObject body = chatCompletionEnvelope(raw, "created", choice);
@@ -184,6 +186,18 @@ public final class ProtocolResponseDecoder {
             metadata.addProperty("opaqueRequired", !metadataPrefix.isEmpty());
         }
         return new DecodedResponse(body, metadataKey, metadata);
+    }
+
+    /**
+     * Anthropic {@code stop_reason} 到 Chat Completions {@code finish_reason} 的统一映射；
+     * 未知值保持透传。{@code max_tokens} 在解码入口已按不完整响应拒绝，不会到达此处。
+     */
+    private static String anthropicFinishReason(String stopReason) {
+        return switch (stopReason) {
+            case "end_turn", "stop_sequence" -> "stop";
+            case "tool_use" -> "tool_calls";
+            default -> stopReason;
+        };
     }
 
     private static JsonObject anthropicToolCall(JsonObject block) throws ProtocolException {

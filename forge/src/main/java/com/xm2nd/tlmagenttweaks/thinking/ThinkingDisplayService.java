@@ -52,7 +52,7 @@ public final class ThinkingDisplayService {
     /** 当前有效的请求句柄：键随回调被回收，值不反向持有回调，避免弱引用登记被值拖住。 */
     private static final Map<LLMCallback, Handle> CURRENT =
             Collections.synchronizedMap(new WeakHashMap<>());
-    /** 女仆 UUID → 正在跟踪该女仆的玩家 UUID 集合。 */
+    /** 女仆 UUID → 正在跟踪该女仆的玩家 UUID 集合；集合清空时键随之移除，不滞留到停服。 */
     private static final Map<UUID, Set<UUID>> OBSERVERS = new ConcurrentHashMap<>();
     /**
      * 气泡归属：一个等待气泡同时只由一个展示会话负责。
@@ -531,17 +531,18 @@ public final class ThinkingDisplayService {
         if (!(event.getTarget() instanceof EntityMaid maid)) {
             return;
         }
-        Set<UUID> observers = OBSERVERS.get(maid.getUUID());
+        UUID maidId = maid.getUUID();
+        Set<UUID> observers = OBSERVERS.get(maidId);
         if (observers != null) {
-            observers.remove(event.getEntity().getUUID());
+            removeObserver(maidId, observers, event.getEntity().getUUID());
         }
     }
 
     @SubscribeEvent
     public static void onLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         UUID playerId = event.getEntity().getUUID();
-        for (Set<UUID> observers : OBSERVERS.values()) {
-            observers.remove(playerId);
+        for (Map.Entry<UUID, Set<UUID>> entry : OBSERVERS.entrySet()) {
+            removeObserver(entry.getKey(), entry.getValue(), playerId);
         }
     }
 
@@ -559,6 +560,19 @@ public final class ThinkingDisplayService {
 
     private static Set<UUID> observersOf(UUID maidId) {
         return OBSERVERS.computeIfAbsent(maidId, key -> ConcurrentHashMap.newKeySet());
+    }
+
+    /**
+     * 移除一个观察玩家；集合因此清空时连同女仆键一并移除，不把空集合滞留到停服/世界卸载。
+     * 删键在 compute 内按「同一实例且仍为空」判定：与 {@link #onStartTracking} 的
+     * computeIfAbsent 重建竞态时不会误删刚建好的新集合。
+     */
+    private static void removeObserver(UUID maidId, Set<UUID> observers, UUID playerId) {
+        observers.remove(playerId);
+        if (observers.isEmpty()) {
+            OBSERVERS.compute(maidId, (key, current) ->
+                    current == observers && observers.isEmpty() ? null : current);
+        }
     }
 
     // ---------- 发送 ----------
@@ -582,7 +596,7 @@ public final class ThinkingDisplayService {
         for (UUID playerId : List.copyOf(observers)) {
             ServerPlayer player = server.getPlayerList().getPlayer(playerId);
             if (player == null) {
-                observers.remove(playerId);
+                removeObserver(maidId, observers, playerId);
                 continue;
             }
             sendTo(player, payload);
