@@ -62,6 +62,8 @@ public final class TweakPackets {
                 TweakPackets::handleSavePrice);
         registrar.playToClient(PriceTablePayload.TYPE, PriceTablePayload.STREAM_CODEC,
                 TweakPackets::handlePriceTable);
+        registrar.playToClient(PriceDeniedPayload.TYPE, PriceDeniedPayload.STREAM_CODEC,
+                TweakPackets::handlePriceDenied);
         // 思考链展示快照：新增的 optional S2C 通道，不支持它的客户端照常进服（不接收即可）
         registrar.playToClient(ThinkingDisplayPayload.TYPE, ThinkingDisplayPayload.STREAM_CODEC,
                 TweakPackets::handleThinkingDisplay);
@@ -136,6 +138,12 @@ public final class TweakPackets {
                             0, List.of()));
                 }
                 case RequestTokenStatsPayload.VIEW_SERVER -> {
+                    // 统计窗口只接受白名单值，非法天数不进入聚合（避免伪造值产生数千桶）
+                    if (!GranularityUtil.isSupportedWindow(payload.windowDays())) {
+                        TlmAgentTweaks.LOGGER.warn("拒绝来自 {} 的非法统计窗口 {}",
+                                serverPlayer.getGameProfile().getName(), payload.windowDays());
+                        return;
+                    }
                     int today = (int) LocalDate.now().toEpochDay();
                     List<GranularityUtil.Bucket> buckets =
                             GranularityUtil.buckets(payload.windowDays(), today, store.minDay(today));
@@ -162,14 +170,25 @@ public final class TweakPackets {
 
     private static void handlePriceTableRequest(RequestPriceTablePayload payload, IPayloadContext context) {
         context.enqueueWork(() -> {
-            if (context.player() instanceof ServerPlayer serverPlayer && TokenStatsService.isAdmin(serverPlayer)) {
-                context.reply(new PriceTablePayload(TokenStatsService.prices().snapshot()));
+            if (!(context.player() instanceof ServerPlayer serverPlayer)) {
+                return;
             }
+            if (!TokenStatsService.isAdmin(serverPlayer)) {
+                serverPlayer.sendSystemMessage(Component.translatable("message.tlm_agent_tweaks.stats.denied")
+                        .withStyle(net.minecraft.ChatFormatting.RED));
+                context.reply(new PriceDeniedPayload());
+                return;
+            }
+            context.reply(new PriceTablePayload(TokenStatsService.prices().snapshot()));
         });
     }
 
     private static void handlePriceTable(PriceTablePayload payload, IPayloadContext context) {
         context.enqueueWork(() -> ClientPacketHandlers.onPriceTable(payload));
+    }
+
+    private static void handlePriceDenied(PriceDeniedPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> ClientPacketHandlers.onPriceDenied(payload));
     }
 
     private static void handleSavePrice(SaveModelPricePayload payload, IPayloadContext context) {
@@ -202,10 +221,8 @@ public final class TweakPackets {
                 serverPlayer.sendSystemMessage(Component.translatable("message.tlm_agent_tweaks.price.cleared",
                         payload.model()));
             } else {
+                // 载荷构造已保证非清除时恰好四个价格，这里只做数值语义校验
                 double[] values = payload.values();
-                if (values.length != 4) {
-                    return;
-                }
                 for (double value : values) {
                     if (Double.isNaN(value) || Double.isInfinite(value) || value < 0) {
                         return;

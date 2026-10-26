@@ -12,6 +12,7 @@ import java.util.Map;
 @OnlyIn(Dist.CLIENT)
 public final class ClientPriceCache {
     private static volatile long version = 0;
+    private static volatile boolean denied = false;
     private static volatile Map<String, Map<String, Map<String, double[]>>> table = Map.of();
 
     private ClientPriceCache() {
@@ -20,6 +21,16 @@ public final class ClientPriceCache {
     public static void accept(PriceTablePayload payload) {
         table = payload.table();
         version++;
+        denied = false;
+    }
+
+    /** 最近一次价格表请求被服务端拒绝（非管理员）；下一次成功下发时自动清除 */
+    public static void markDenied() {
+        denied = true;
+    }
+
+    public static boolean isDenied() {
+        return denied;
     }
 
     public static long version() {

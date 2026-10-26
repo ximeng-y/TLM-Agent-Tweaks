@@ -69,6 +69,7 @@ public final class TweakPackets {
         toServer(created, RequestPriceTablePayload.class, 6, TweakPackets::handlePriceTableRequest);
         toServer(created, SaveModelPricePayload.class, 7, TweakPackets::handleSavePrice);
         toClient(created, PriceTablePayload.class, 8, TweakPackets::handlePriceTable);
+        toClient(created, PriceDeniedPayload.class, 10, TweakPackets::handlePriceDenied);
 
         // 思考链展示快照：不支持它的客户端照常进服（不接收即可）
         toClient(created, ThinkingDisplayPayload.class, 9, TweakPackets::handleThinkingDisplay);
@@ -136,6 +137,8 @@ public final class TweakPackets {
             payload.write(buf);
         } else if (message instanceof PriceTablePayload payload) {
             payload.write(buf);
+        } else if (message instanceof PriceDeniedPayload payload) {
+            payload.write(buf);
         } else if (message instanceof ThinkingDisplayPayload payload) {
             payload.write(buf);
         } else {
@@ -163,6 +166,8 @@ public final class TweakPackets {
             payload = SaveModelPricePayload.read(buf);
         } else if (type == PriceTablePayload.class) {
             payload = PriceTablePayload.read(buf);
+        } else if (type == PriceDeniedPayload.class) {
+            payload = PriceDeniedPayload.read(buf);
         } else if (type == ThinkingDisplayPayload.class) {
             payload = ThinkingDisplayPayload.read(buf);
         } else {
@@ -259,6 +264,12 @@ public final class TweakPackets {
                         0, List.of()), context);
             }
             case RequestTokenStatsPayload.VIEW_SERVER -> {
+                // 统计窗口只接受白名单值，非法天数不进入聚合（避免伪造值产生数千桶）
+                if (!GranularityUtil.isSupportedWindow(payload.windowDays())) {
+                    TlmAgentTweaks.LOGGER.warn("拒绝来自 {} 的非法统计窗口 {}",
+                            serverPlayer.getGameProfile().getName(), payload.windowDays());
+                    return;
+                }
                 int today = (int) LocalDate.now().toEpochDay();
                 List<GranularityUtil.Bucket> buckets =
                         GranularityUtil.buckets(payload.windowDays(), today, store.minDay(today));
@@ -286,13 +297,24 @@ public final class TweakPackets {
                                                 Supplier<NetworkEvent.Context> ctx) {
         NetworkEvent.Context context = ctx.get();
         ServerPlayer serverPlayer = context.getSender();
-        if (serverPlayer != null && TokenStatsService.isAdmin(serverPlayer)) {
-            reply(new PriceTablePayload(TokenStatsService.prices().snapshot()), context);
+        if (serverPlayer == null) {
+            return;
         }
+        if (!TokenStatsService.isAdmin(serverPlayer)) {
+            serverPlayer.sendSystemMessage(Component.translatable("message.tlm_agent_tweaks.stats.denied")
+                    .withStyle(net.minecraft.ChatFormatting.RED));
+            reply(new PriceDeniedPayload(), context);
+            return;
+        }
+        reply(new PriceTablePayload(TokenStatsService.prices().snapshot()), context);
     }
 
     private static void handlePriceTable(PriceTablePayload payload, Supplier<NetworkEvent.Context> ctx) {
         ClientPacketHandlers.onPriceTable(payload);
+    }
+
+    private static void handlePriceDenied(PriceDeniedPayload payload, Supplier<NetworkEvent.Context> ctx) {
+        ClientPacketHandlers.onPriceDenied(payload);
     }
 
     private static void handleSavePrice(SaveModelPricePayload payload, Supplier<NetworkEvent.Context> ctx) {
@@ -326,10 +348,8 @@ public final class TweakPackets {
             serverPlayer.sendSystemMessage(Component.translatable("message.tlm_agent_tweaks.price.cleared",
                     payload.model()));
         } else {
+            // 载荷构造已保证非清除时恰好四个价格，这里只做数值语义校验
             double[] values = payload.values();
-            if (values.length != 4) {
-                return;
-            }
             for (double value : values) {
                 if (Double.isNaN(value) || Double.isInfinite(value) || value < 0) {
                     return;

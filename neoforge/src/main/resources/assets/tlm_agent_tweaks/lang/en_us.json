@@ -64,6 +64,8 @@
   "gui.tlm_agent_tweaks.price.no_sites": "No LLM sites available (admin must configure first)",
   "gui.tlm_agent_tweaks.price.bad_number": "Prices must be non-negative numbers (blank = 0)",
   "gui.tlm_agent_tweaks.price.sending": "Sent, waiting for server…",
+  "gui.tlm_agent_tweaks.price.loading": "Loading price table…",
+  "gui.tlm_agent_tweaks.price.denied": "No permission: only admins can manage model prices",
   "gui.tlm_agent_tweaks.price.save_site_model_first": "Save the site and current model first",
 
   "disconnect.tlm_agent_tweaks.missing_server": "Cannot join: this server does not have TLM Agent Tweaks installed (server-side support is required)",

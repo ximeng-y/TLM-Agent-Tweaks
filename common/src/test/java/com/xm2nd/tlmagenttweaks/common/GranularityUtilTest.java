@@ -6,8 +6,22 @@ import java.time.LocalDate;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GranularityUtilTest {
+
+    @Test
+    void supportedWindowMatchesWhitelist() {
+        for (int window : GranularityUtil.WINDOWS) {
+            assertTrue(GranularityUtil.isSupportedWindow(window));
+        }
+        assertFalse(GranularityUtil.isSupportedWindow(2));
+        assertFalse(GranularityUtil.isSupportedWindow(-1));
+        assertFalse(GranularityUtil.isSupportedWindow(1000000));
+        assertFalse(GranularityUtil.isSupportedWindow(Integer.MIN_VALUE));
+        assertFalse(GranularityUtil.isSupportedWindow(Integer.MAX_VALUE));
+    }
 
     @Test
     void shortWindowIsDailyBuckets() {

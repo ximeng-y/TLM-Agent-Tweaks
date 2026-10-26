@@ -20,6 +20,16 @@ public final class GranularityUtil {
     private GranularityUtil() {
     }
 
+    /** windowDays 是否为支持的统计窗口（{@link #WINDOWS} 白名单之一）；服务端以此拒绝任意伪造值 */
+    public static boolean isSupportedWindow(int windowDays) {
+        for (int supported : WINDOWS) {
+            if (supported == windowDays) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public enum BucketUnit {
         DAY, WEEK, MONTH
     }
