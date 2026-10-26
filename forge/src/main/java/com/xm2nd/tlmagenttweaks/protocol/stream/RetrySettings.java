@@ -9,10 +9,10 @@ import java.time.Duration;
  * 请求重试的固定规则与服务端权威开关。
  * <p>
  * 次数与等待时长本轮不开放配置，只提供 {@code retry.enabled} 总开关；
- * 站点积压放行间隔与单次重试等待取同一常量：一次重试正好对应一个站点额度周期，
+ * 同站点发送间隔与单次重试等待取同一常量：一次重试正好对应一个发送间隔，
  * 避免出现「重试比站点恢复还快」的无效请求。
  * <p>
- * 状态码重试与响应头前断连的流式重发共用这份等待与放行间隔，但各自独立计数：
+ * 状态码重试与响应头前断连的流式重发共用这份等待与发送间隔，但各自独立计数：
  * 传输重试不占用 {@link #MAX_RETRIES} 额度。
  */
 public final class RetrySettings {
@@ -23,7 +23,7 @@ public final class RetrySettings {
     /** 每次重试前的固定等待，忽略服务端返回的 {@code Retry-After}。 */
     public static final Duration RETRY_DELAY = Duration.ofSeconds(5);
 
-    /** 同一站点积压放行的最小间隔。 */
+    /** 同一站点相邻两次发送之间的最小间隔。 */
     public static final Duration SITE_SPACING = Duration.ofSeconds(5);
 
     private static final RequestRetryPolicy ENABLED =
