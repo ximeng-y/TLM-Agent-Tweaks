@@ -37,19 +37,21 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>用绝对截止时刻推进调度，不使用 {@code Thread.sleep}，也不阻塞服务端主线程。</li>
  * </ul>
  * 全部状态由同一把锁保护；所有对外回调都在锁外执行，第三方回调不会阻塞调度。
+ * 回调由提交方在提交时一并给出，因此不存在“回调尚未注册就被触发”的竞态；
+ * 回调一律在调度线程上执行，实现方不得在其中阻塞。
  */
-public final class SiteThrottleScheduler implements SendGate {
+public final class SiteThrottleScheduler {
+
+    /** 无站点上下文时使用的站点标识。 */
+    public static final String DEFAULT_SITE = "";
 
     private final long spacingNanos;
-    private final long retryDelayNanos;
     private final ScheduledExecutorService scheduler;
     private final Object lock = new Object();
     private final Map<String, SiteState> sites = new HashMap<>();
-    private boolean stopped;
 
-    public SiteThrottleScheduler(Duration spacing, Duration retryDelay) {
+    public SiteThrottleScheduler(Duration spacing) {
         this.spacingNanos = Math.max(0L, Objects.requireNonNull(spacing, "spacing").toNanos());
-        this.retryDelayNanos = Math.max(0L, Objects.requireNonNull(retryDelay, "retryDelay").toNanos());
         ThreadFactory factory = runnable -> {
             Thread thread = new Thread(runnable, "tlm-request-timer");
             thread.setDaemon(true);
@@ -58,41 +60,56 @@ public final class SiteThrottleScheduler implements SendGate {
         this.scheduler = Executors.newSingleThreadScheduledExecutor(factory);
     }
 
-    /** 重试自身的固定等待时长；传输状态机与本调度器共用同一份常量。 */
-    public long retryDelayNanos() {
-        return retryDelayNanos;
+    /** 尚未放行的发送请求。 */
+    public interface Handle {
+        /** 撤销等待；已经放行的请求不受影响。 */
+        void cancel();
     }
 
-    @Override
+    /** 发送请求的时序回调。三个方法各自至多触发一次。 */
+    public interface Send {
+        /** 已放行，可以真正发送。 */
+        void onGranted();
+
+        /** 因站点冷却或未到该站点本次允许发送的时刻而排队（不含请求自身的重试等待）。 */
+        void onQueued();
+
+        /** 尚未放行即被丢弃（服务端停止）。 */
+        void onDiscarded();
+    }
+
+    /**
+     * 提交一次发送请求。
+     *
+     * @param siteId       站点标识（TLM 的 {@code site.id()}）
+     * @param waitForNanos 本次请求自身的等待时长（重试等待）；0 表示立即可发送
+     * @param send         时序回调
+     * @return 尚未放行时可撤销的句柄
+     */
     public Handle submit(String siteId, long waitForNanos, Send send) {
         Objects.requireNonNull(send, "send");
         Request request = new Request(siteId, waitForNanos, send);
-        Runnable discarded = null;
         synchronized (lock) {
-            if (stopped) {
-                discarded = request.discard();
+            SiteState site = site(request.siteId);
+            long now = System.nanoTime();
+            if (request.readyAt <= now) {
+                site.queue.addLast(request);
             } else {
-                SiteState site = site(request.siteId);
-                long now = System.nanoTime();
-                if (request.readyAt <= now) {
-                    site.queue.addLast(request);
-                } else {
-                    // List 的 addLast 是 JDK 21 的 SequencedCollection 才有的方法，
-                    // common 源码要同时被 Java 17 的 forge 薄壳编译，这里用 add
-                    site.waiting.add(request);
-                }
-                // 放行只在调度线程上发生：这里只登记，并让调度线程立刻按最新时序处理一次
-                // （放行条件未满足时该次处理只补发排队通知并改排到真正的允许时刻）。
-                schedule(site, now, now);
+                // List 的 addLast 是 JDK 21 的 SequencedCollection 才有的方法，
+                // common 源码要同时被 Java 17 的 forge 薄壳编译，这里用 add
+                site.waiting.add(request);
             }
-        }
-        if (discarded != null) {
-            runOne(discarded);
+            // 放行只在调度线程上发生：这里只登记，并让调度线程立刻按最新时序处理一次
+            // （放行条件未满足时该次处理只补发排队通知并改排到真正的允许时刻）。
+            schedule(site, now, now);
         }
         return request;
     }
 
-    @Override
+    /**
+     * 把该站点的冷却截止时刻推进到 {@code max(已有截止, 当前时刻 + cooldown)}；
+     * 不会因为更短的冷却而提前，也不会取消已经发出的请求。
+     */
     public void throttle(String siteId, Duration cooldown) {
         if (cooldown == null || cooldown.isZero() || cooldown.isNegative()) {
             return;
@@ -131,17 +148,6 @@ public final class SiteThrottleScheduler implements SendGate {
         runAll(actions);
     }
 
-    /** 当前尚未放行的等待项数量（诊断与测试用）。 */
-    public int pendingCount() {
-        synchronized (lock) {
-            int total = 0;
-            for (SiteState site : sites.values()) {
-                total += site.waiting.size() + site.queue.size();
-            }
-            return total;
-        }
-    }
-
     private static String key(String siteId) {
         return siteId == null ? DEFAULT_SITE : siteId;
     }
@@ -159,7 +165,7 @@ public final class SiteThrottleScheduler implements SendGate {
         Runnable granted;
         List<Runnable> notices;
         synchronized (lock) {
-            if (stopped || sites.get(site.siteId) != site) {
+            if (sites.get(site.siteId) != site) {
                 return;
             }
             site.task = null;

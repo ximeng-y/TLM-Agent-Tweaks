@@ -13,6 +13,7 @@ import com.xm2nd.tlmagenttweaks.common.TokenRequestContext;
 import com.xm2nd.tlmagenttweaks.common.TokenStatsHttpResponse;
 import com.xm2nd.tlmagenttweaks.common.protocol.ProtocolException;
 import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
+import com.xm2nd.tlmagenttweaks.common.stream.HttpStringResponse;
 import com.xm2nd.tlmagenttweaks.protocol.ProtocolBridge;
 import com.xm2nd.tlmagenttweaks.protocol.stream.ProtocolHttpBridge;
 import com.xm2nd.tlmagenttweaks.stats.TokenStatsService;
@@ -171,7 +172,7 @@ public abstract class LLMOpenAIClientMixin {
                 Object message = Client.GSON.fromJson(response.body(), type);
                 consumer.accept(message);
             } else {
-                String message = "HTTP Error Code: %d, Response: %s".formatted(statusCode, response.body());
+                String message = "HTTP Error Code: %d, Response: %s".formatted(statusCode, reportedBody(response));
                 ProtocolHttpBridge.dispatchFailure(callback, request,
                         new Throwable(message), ErrorCode.REQUEST_RECEIVED_ERROR);
             }
@@ -180,6 +181,14 @@ public abstract class LLMOpenAIClientMixin {
             ProtocolHttpBridge.dispatchFailure(callback, request,
                     new Throwable(message), ErrorCode.JSON_DECODE_ERROR);
         }
+    }
+
+    /** 失败提示用对外上报正文（错误响应为截断后的错误页）；非包装响应回退完整正文。 */
+    private static String reportedBody(HttpResponse<String> response) {
+        // 统计归因包装在外层，先解包才能看到传输层的可截断正文
+        HttpResponse<String> delegate = response instanceof TokenStatsHttpResponse stats
+                ? stats.delegate() : response;
+        return delegate instanceof HttpStringResponse http ? http.reportedBody() : delegate.body();
     }
 
     @Inject(method = "handle", at = @At("HEAD"), cancellable = true)

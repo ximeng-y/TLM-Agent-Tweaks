@@ -1,6 +1,5 @@
 package com.xm2nd.tlmagenttweaks.common.stream;
 
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.xm2nd.tlmagenttweaks.common.protocol.ProtocolException;
@@ -9,37 +8,30 @@ import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.UncheckedIOException;
 import java.net.http.HttpClient;
-import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Flow;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 纯 JDK 流式 HTTP 状态机：流式优先、断流非流式回退、指定 HTTP 状态码重试。
+ * <p>
+ * 本类只承载状态转换与资源归属（{@link Session}、{@code Attempt}、{@link Call}）；
+ * 请求体编解码在 {@link StreamBodyCodec}，正文读取与聚合器装配在 {@link StreamBodyReader}，
+ * 尝试判定规则在 {@link HttpRetryRules}，共享线程设施在 {@link TransportExecutors}。
  * <p>
  * 一个 {@link Session} 对应一次逻辑模型请求，其内部至多发生
  * {@code 1 + 1 + maxRetries + 1} 次实际 HTTP 尝试，三条路径各自计数、互不占用对方额度：
@@ -66,33 +58,6 @@ public final class StreamingHttpTransport {
     private static final Logger LOGGER = LoggerFactory.getLogger(StreamingHttpTransport.class);
     private static final Duration DEFAULT_PHASE_TIMEOUT = Duration.ofSeconds(60);
     private static final Duration MAX_PHASE_TIMEOUT = Duration.ofSeconds(90);
-    private static final int READ_BUFFER_BYTES = 8192;
-    /** 交回调用方的错误正文上限，避免整个错误页进入日志与聊天栏。 */
-    private static final int MAX_ERROR_BODY_CHARS = 4096;
-
-    private static final ExecutorService READER = Executors.newCachedThreadPool(runnable -> {
-        Thread thread = new Thread(runnable, "tlm-stream-reader");
-        thread.setDaemon(true);
-        return thread;
-    });
-
-    /**
-     * 读 body 硬截止计时器：JDK {@code HttpRequest.timeout} 只覆盖“收到响应头”，
-     * 无法中断已获得的 {@link InputStream} 阻塞读取，因此必须由独立计时器强制
-     * 关闭流并让本次尝试作废。
-     */
-    private static final ScheduledExecutorService DEADLINE = Executors.newScheduledThreadPool(1, runnable -> {
-        Thread thread = new Thread(runnable, "tlm-stream-deadline");
-        thread.setDaemon(true);
-        return thread;
-    });
-
-    static {
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            READER.shutdownNow();
-            DEADLINE.shutdownNow();
-        }, "tlm-stream-shutdown"));
-    }
 
     private final Duration phaseTimeout;
     private final SiteThrottleScheduler gate;
@@ -110,17 +75,6 @@ public final class StreamingHttpTransport {
         this.gate = gate;
     }
 
-    /** 站点调度器；服务端停止时由生命周期统一丢弃排队与延迟发送任务。 */
-    public SiteThrottleScheduler gate() {
-        return gate;
-    }
-
-    public static FrozenRequest freeze(HttpRequest request) {
-        HttpRequest.BodyPublisher publisher = request.bodyPublisher().orElseThrow(
-                () -> new IllegalArgumentException("Streaming request must have a body"));
-        return new FrozenRequest(request, readPublisher(publisher));
-    }
-
     /**
      * 建立一次逻辑请求的状态机（尚未发送），并把发送时机交给调用方：
      * 调用方可以先登记取消句柄，再调用 {@link Call#start()}，避免登记前的取消竞态。
@@ -131,7 +85,7 @@ public final class StreamingHttpTransport {
                         AttemptListener attemptListener) {
         Session session = new Session(frozen, protocol, listener, resolveTimeout(frozen.request()));
         session.client = client;
-        session.siteId = siteId == null ? SendGate.DEFAULT_SITE : siteId;
+        session.siteId = siteId == null ? SiteThrottleScheduler.DEFAULT_SITE : siteId;
         session.budget = budget;
         session.policy = policy == null ? RequestRetryPolicy.DISABLED : policy;
         session.attemptListener = attemptListener == null ? AttemptListener.NO_OP : attemptListener;
@@ -153,49 +107,6 @@ public final class StreamingHttpTransport {
         return sendCall(client, frozen, protocol, listener).future();
     }
 
-    /** 一次性读完请求体，使重试与回退都能复用同一份字节。 */
-    private static byte[] readPublisher(HttpRequest.BodyPublisher publisher) {
-        int initial = publisher.contentLength() > 0 && publisher.contentLength() < Integer.MAX_VALUE
-                ? (int) publisher.contentLength() : 256;
-        ByteArrayOutputStream out = new ByteArrayOutputStream(initial);
-        CompletableFuture<Throwable> finished = new CompletableFuture<>();
-        publisher.subscribe(new Flow.Subscriber<>() {
-            @Override
-            public void onSubscribe(Flow.Subscription subscription) {
-                subscription.request(Long.MAX_VALUE);
-            }
-
-            @Override
-            public void onNext(ByteBuffer item) {
-                byte[] chunk = new byte[item.remaining()];
-                item.get(chunk);
-                out.write(chunk, 0, chunk.length);
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                finished.complete(throwable);
-            }
-
-            @Override
-            public void onComplete() {
-                finished.complete(null);
-            }
-        });
-        try {
-            Throwable failure = finished.get(30, TimeUnit.SECONDS);
-            if (failure != null) {
-                throw new UncheckedIOException(new IOException("Request body publisher failed", failure));
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new UncheckedIOException(new IOException("Interrupted while reading request body", e));
-        } catch (ExecutionException | TimeoutException e) {
-            throw new UncheckedIOException(new IOException("Failed to read request body", e));
-        }
-        return out.toByteArray();
-    }
-
     private Duration resolveTimeout(HttpRequest request) {
         Duration configured = phaseTimeout;
         if (configured == null) {
@@ -205,24 +116,6 @@ public final class StreamingHttpTransport {
             configured = DEFAULT_PHASE_TIMEOUT;
         }
         return configured.compareTo(MAX_PHASE_TIMEOUT) > 0 ? MAX_PHASE_TIMEOUT : configured;
-    }
-
-    public static final class FrozenRequest {
-        private final HttpRequest request;
-        private final byte[] body;
-
-        private FrozenRequest(HttpRequest request, byte[] body) {
-            this.request = request;
-            this.body = body;
-        }
-
-        public HttpRequest request() {
-            return request;
-        }
-
-        public byte[] body() {
-            return body.clone();
-        }
     }
 
     /** 一次逻辑请求的可撤销句柄。 */
@@ -249,6 +142,7 @@ public final class StreamingHttpTransport {
             session.cancel();
         }
 
+        /** 所属状态机（测试断言诊断状态用）。 */
         public Session session() {
             return session;
         }
@@ -273,7 +167,7 @@ public final class StreamingHttpTransport {
          * @param stage        等待类型
          * @param firstAttempt 是否为整轮请求的第一次发送（首次发送不等待）
          * @param retryOrdinal 已消耗的状态码重试次数（1 起；站点排队场景为 0）
-         * @param rateLimited  上一次尝试是否因 429 被限流（状态而非起因，不能并入 {@code cause}）
+         * @param rateLimited  上一次尝试是否因 429 被限流（状态而不是起因，不能并入 {@code cause}）
          * @param cause        本次尝试的起因；首次发送为 {@code null}（此时只可能出现站点排队提示）。
          *                     关闭重试时的静默回退不走本方法，因此不会在这里产生任何提示
          */
@@ -317,15 +211,15 @@ public final class StreamingHttpTransport {
         private final AtomicReference<Attempt> activeAttempt = new AtomicReference<>();
         private final AtomicBoolean terminal = new AtomicBoolean();
         private final CompletableFuture<HttpResponse<String>> result = new CompletableFuture<>();
-        private final List<SendGate.Handle> queueHandles = new CopyOnWriteArrayList<>();
+        private final List<SiteThrottleScheduler.Handle> queueHandles = new CopyOnWriteArrayList<>();
         private final AtomicInteger statusRetries = new AtomicInteger();
-        /** statusRetries 已在 wait 中就绪时置位，保证真正的发送只消耗一次额度。 */
+        /** 仅用于并发决策去重：立即复位，不代表存在跨越等待期的持续预留。 */
         private final AtomicBoolean retryReserved = new AtomicBoolean();
         /** 响应头前断连的流式重发是否已用掉；单点写入，但取消与状态码分支也会读。 */
         private final AtomicBoolean transportRetried = new AtomicBoolean();
 
         private volatile HttpClient client;
-        private volatile String siteId = SendGate.DEFAULT_SITE;
+        private volatile String siteId = SiteThrottleScheduler.DEFAULT_SITE;
         private volatile ConversationBudget budget;
         private volatile RequestRetryPolicy policy = RequestRetryPolicy.DISABLED;
         private volatile AttemptListener attemptListener = AttemptListener.NO_OP;
@@ -344,20 +238,12 @@ public final class StreamingHttpTransport {
             this.timeout = timeout;
         }
 
-        /** 已消耗的状态码重试次数。 */
-        public int statusRetriesUsed() {
-            return statusRetries.get();
-        }
-
-        public int dispatchCount() {
-            return dispatchCount;
-        }
-
+        /** 本轮是否已改用非流式回退（测试断言用）。 */
         public boolean usedFallback() {
             return usedFallback;
         }
 
-        /** 响应头前断连的流式重发是否已用掉（诊断与测试用）。 */
+        /** 响应头前断连的流式重发是否已用掉（测试断言用）。 */
         public boolean transportRetried() {
             return transportRetried.get();
         }
@@ -383,8 +269,8 @@ public final class StreamingHttpTransport {
             byte[] body;
             try {
                 body = streaming
-                        ? addStreamFields(protocol, frozen.body())
-                        : removeStreamFields(protocol, frozen.body());
+                        ? StreamBodyCodec.addStreamFields(protocol, frozen.body())
+                        : StreamBodyCodec.removeStreamFields(protocol, frozen.body());
             } catch (ProtocolException e) {
                 finish(null, e);
                 return;
@@ -409,7 +295,7 @@ public final class StreamingHttpTransport {
             if (wait > 0L) {
                 notifyScheduled(AttemptListener.Stage.RETRY_WAIT, firstAttempt, ordinal, rateLimited, cause);
             }
-            SendGate.Handle handle = gate.submit(siteId, wait, new SendGate.Send() {
+            SiteThrottleScheduler.Handle handle = gate.submit(siteId, wait, new SiteThrottleScheduler.Send() {
                 @Override
                 public void onGranted() {
                     if (isFinished()) {
@@ -473,7 +359,7 @@ public final class StreamingHttpTransport {
                     });
                     // 截止计时器是在途尝试的超时出口：它只把超时记在本次尝试上，
                     // 不在这里判成败——真正的收口统一发生在读取线程捕获到失败之后。
-                    current.guard = DEADLINE.schedule(() -> {
+                    current.guard = TransportExecutors.DEADLINE.schedule(() -> {
                         ProtocolException timeout = new ProtocolException(
                                 "LLM request phase exceeded deadline " + attemptTimeout());
                         synchronized (current) {
@@ -489,7 +375,7 @@ public final class StreamingHttpTransport {
                 current.finish(null, error);
                 return;
             }
-            READER.execute(() -> run(current, streaming, deadline));
+            TransportExecutors.READER.execute(() -> run(current, streaming, deadline));
         }
 
         private void run(Attempt current, boolean streaming, long deadline) {
@@ -501,22 +387,40 @@ public final class StreamingHttpTransport {
             // 读到一半卡死，那是传输失败，与「完整取回但解码失败」是两回事。
             boolean bodyPhase = false;
             boolean bodyRead = false;
+            StreamBodyReader.AttemptGuard guard = new StreamBodyReader.AttemptGuard() {
+                @Override
+                public void ensureActive() {
+                    current.ensureActive();
+                }
+
+                @Override
+                public void onEvent(StreamEventType type, String text) {
+                    synchronized (current) {
+                        current.ensureActive();
+                        emit(type, text);
+                    }
+                }
+            };
             try {
                 HttpResponse<InputStream> head = current.send.join();
                 bodyPhase = true;
                 current.registerStream(head.body());
                 current.ensureActive();
                 int status = head.statusCode();
-                if (!isSuccessful(status)) {
-                    String errorBody = readAll(head.body(), deadline, current);
+                if (!HttpRetryRules.isSuccessful(status)) {
+                    // 错误正文只用于提示、日志与回退判定，读取有硬上限；成功正文仍须完整。
+                    String errorBody = StreamBodyReader.readAll(head.body(), deadline, guard,
+                            HttpRetryRules.MAX_ERROR_BODY_CHARS);
                     onErrorStatus(current, streaming, head, errorBody);
                     return;
                 }
-                ContentKind kind = streaming ? contentKind(head.headers()) : ContentKind.JSON;
-                String raw = kind == ContentKind.JSON
-                        ? readAll(head.body(), deadline, current)
-                        : readStream(head.body(), deadline, current);
-                if (kind == ContentKind.JSON && raw.isEmpty()) {
+                StreamBodyReader.ContentKind kind = streaming
+                        ? StreamBodyReader.contentKind(head.headers())
+                        : StreamBodyReader.ContentKind.JSON;
+                String raw = kind == StreamBodyReader.ContentKind.JSON
+                        ? StreamBodyReader.readAll(head.body(), deadline, guard)
+                        : StreamBodyReader.readStream(head.body(), deadline, protocol, guard);
+                if (kind == StreamBodyReader.ContentKind.JSON && raw.isEmpty()) {
                     // 零字节正文不能算完整取回：Content-Length 缺失或被代理改写成 0、网关在
                     // 上游失败时回 200 空体都会走到这里，与「正文读到一半断开」是同一类失败。
                     throw new IOException("Response headers received but body is empty");
@@ -550,7 +454,7 @@ public final class StreamingHttpTransport {
          * 判定不依赖异常类型，而是看**本次尝试自身**记录的事实：
          * <ul>
          *   <li>是否已经拿到响应头——没有才是响应头前失败；</li>
-         *   <li>{@link Attempt#timedOut}——截止计时器作废在途尝试时，会取消 {@code sendAsync}，
+         *   <li>{@code Attempt.timedOut}——截止计时器作废在途尝试时，会取消 {@code sendAsync}，
          *       {@code send.join()} 随之抛出没有语义的 {@link CancellationException}，
          *       原始超时原因被顶替。只看异常类型会把最常见的一种情形（服务端在响应头前挂起
          *       直到超时）误判成「调用方取消」而放弃重发；</li>
@@ -586,11 +490,11 @@ public final class StreamingHttpTransport {
             if (isFinished()) {
                 return;
             }
-            if (streaming && shouldRetryWithoutStream(status, errorBody)) {
+            if (streaming && HttpRetryRules.shouldRetryWithoutStream(status, errorBody)) {
                 fallback(AttemptListener.Cause.FALLBACK, new StreamUnsupportedException(status, errorBody));
                 return;
             }
-            if (policy.enabled() && isRetryableStatus(status)) {
+            if (policy.enabled() && HttpRetryRules.isRetryableStatus(status)) {
                 reserveRetry();
                 if (!isBudgetExpired() && statusRetries.get() <= policy.maxRetries()) {
                     // 保持当前模式重试：已经回退过就一直是非流式。
@@ -598,7 +502,7 @@ public final class StreamingHttpTransport {
                     return;
                 }
             }
-            finish(HttpStringResponse.of(head, errorBody, truncate(errorBody)), null);
+            finish(HttpStringResponse.of(head, errorBody, HttpRetryRules.truncate(errorBody)), null);
         }
 
         /**
@@ -666,17 +570,18 @@ public final class StreamingHttpTransport {
         }
 
         private void releaseQueueHandles() {
-            for (SendGate.Handle handle : queueHandles) {
+            for (SiteThrottleScheduler.Handle handle : queueHandles) {
                 handle.cancel();
             }
             queueHandles.clear();
         }
 
         /**
-         * 预留一次状态码重试额度。
+         * 状态码重试额度计数：在决定重试的当下立即计入 {@code statusRetries}，
+         * 其后的等待、排队与取消不再回退该计数（取消排队中的重试不返还额度）。
          * <p>
-         * 在等待开始时预留，因此“取消排队中的重试”不会白白消耗一次额度，
-         * 也不会出现同一次尝试被计两次的情况。
+         * {@code retryReserved} 只保证同一时刻的并发决策至多计一次，
+         * 立即复位，不构成持续预留。
          */
         private void reserveRetry() {
             if (retryReserved.compareAndSet(false, true)) {
@@ -695,7 +600,7 @@ public final class StreamingHttpTransport {
                 fail(failure);
                 return;
             }
-            if (response != null && isSuccessful(response.statusCode())) {
+            if (response != null && HttpRetryRules.isSuccessful(response.statusCode())) {
                 // 整轮（含全部重试与回退）确定成功后才提交，部分响应不会进入统计或历史。
                 notifyAggregated(JsonParser.parseString(response.body()).getAsJsonObject());
             }
@@ -731,71 +636,6 @@ public final class StreamingHttpTransport {
                 return true;
             }
             return false;
-        }
-
-        /** 消费 SSE：终止标志到达即停止读取（keep-alive 连接不必等 EOF）。 */
-        private String readStream(InputStream stream, long deadline, Attempt current) throws Exception {
-            ProtocolStreamRequestListener guardedListener = new ProtocolStreamRequestListener() {
-                @Override
-                public void onEvent(String id, StreamEventType type, String text) {
-                    synchronized (current) {
-                        current.ensureActive();
-                        emit(type, text);
-                    }
-                }
-            };
-            ProtocolStreamAggregator aggregator = newAggregator(protocol, guardedListener, requestId);
-            SseDecoder decoder = new SseDecoder();
-            try (stream) {
-                byte[] buffer = new byte[READ_BUFFER_BYTES];
-                while (true) {
-                    ensureWithinDeadline(deadline);
-                    int read = stream.read(buffer);
-                    if (read < 0) {
-                        break;
-                    }
-                    if (read == 0) {
-                        continue;
-                    }
-                    for (SseEvent event : decoder.feed(buffer, 0, read)) {
-                        current.ensureActive();
-                        aggregator.accept(event.data());
-                        if (aggregator.complete()) {
-                            break;
-                        }
-                    }
-                    if (aggregator.complete()) {
-                        break;
-                    }
-                }
-                if (!aggregator.complete()) {
-                    for (SseEvent event : decoder.finish()) {
-                        current.ensureActive();
-                        aggregator.accept(event.data());
-                    }
-                }
-                return aggregator.finish().toString();
-            }
-        }
-
-        private String readAll(InputStream stream, long deadline, Attempt current) throws Exception {
-            try (stream) {
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
-                byte[] buffer = new byte[READ_BUFFER_BYTES];
-                while (true) {
-                    ensureWithinDeadline(deadline);
-                    int read = stream.read(buffer);
-                    if (read < 0) {
-                        break;
-                    }
-                    if (read == 0) {
-                        continue;
-                    }
-                    current.ensureActive();
-                    out.write(buffer, 0, read);
-                }
-                return out.toString(StandardCharsets.UTF_8);
-            }
         }
 
         private HttpRequest rebuild(byte[] body) {
@@ -844,7 +684,7 @@ public final class StreamingHttpTransport {
 
         /** 终态事件只发一次：2xx 成功记为 COMPLETED，其余（含透传的 HTTP 错误）记为 FAILED。 */
         private void emitTerminal(HttpResponse<String> response) {
-            if (response != null && isSuccessful(response.statusCode())) {
+            if (response != null && HttpRetryRules.isSuccessful(response.statusCode())) {
                 complete();
             } else {
                 fail(null);
@@ -923,117 +763,6 @@ public final class StreamingHttpTransport {
                     future.completeExceptionally(cause);
                 }
             }
-        }
-    }
-
-    private static ProtocolStreamAggregator newAggregator(SiteProtocol protocol,
-                                                          ProtocolStreamRequestListener listener,
-                                                          String requestId) {
-        StreamEventListener bridge = listener == null ? null
-                : event -> {
-                    // 只读增量监听者的异常必须隔离，不能中断聚合或触发回退。
-                    try {
-                        listener.onEvent(requestId, event.type(), event.text());
-                    } catch (Throwable throwable) {
-                        LOGGER.warn("流式增量监听器抛出异常（已隔离）", throwable);
-                    }
-                };
-        return switch (protocol) {
-            case CHAT_COMPLETIONS -> new ChatCompletionsStreamAggregator(bridge);
-            case RESPONSES -> new ResponsesStreamAggregator(bridge);
-            case ANTHROPIC_MESSAGES -> new AnthropicStreamAggregator(bridge);
-        };
-    }
-
-    enum ContentKind {
-        SSE,
-        JSON
-    }
-
-    static ContentKind contentKind(HttpHeaders headers) {
-        String contentType = headers.firstValue("Content-Type").orElse("").toLowerCase(Locale.ROOT);
-        if (contentType.contains("text/event-stream")) {
-            return ContentKind.SSE;
-        }
-        if (contentType.contains("application/json") || contentType.contains("+json")) {
-            return ContentKind.JSON;
-        }
-        // 未声明或未知类型时按 SSE 处理，保持既有行为。
-        return ContentKind.SSE;
-    }
-
-    /** 允许做一次非流式回退之外，指定可重试的 HTTP 状态码。 */
-    static boolean isRetryableStatus(int status) {
-        return status == 429 || status == 500 || status == 502 || status == 503 || status == 504;
-    }
-
-    /**
-     * 仅当服务端明确表示 stream/stream_options 不受支持时才允许非流式回退。
-     * 鉴权、限流、普通参数错误与服务端错误均原样透传。
-     */
-    static boolean shouldRetryWithoutStream(int status, String body) {
-        if (status == 401 || status == 403 || status == 404 || status == 429) {
-            return false;
-        }
-        if (status != 400 && status != 415 && status != 422) {
-            return false;
-        }
-        String text = body == null ? "" : body.toLowerCase(Locale.ROOT);
-        return text.matches("(?s).*\\bstream(?:ing|_options)?\\b.*")
-                && (text.contains("not support") || text.contains("unsupported")
-                || text.contains("unknown") || text.contains("unrecognized") || text.contains("invalid")
-                || text.contains("cannot") || text.contains("does not support"));
-    }
-
-    private static String truncate(String body) {
-        if (body == null || body.length() <= MAX_ERROR_BODY_CHARS) {
-            return body;
-        }
-        return body.substring(0, MAX_ERROR_BODY_CHARS);
-    }
-
-    private static void ensureWithinDeadline(long deadline) throws IOException {
-        if (System.nanoTime() - deadline >= 0) {
-            throw new IOException("Streaming read deadline exceeded");
-        }
-    }
-
-    private static boolean isSuccessful(int status) {
-        return status >= 200 && status < 300;
-    }
-
-    static byte[] addStreamFields(SiteProtocol protocol, byte[] body) throws ProtocolException {
-        JsonObject json = parseBody(body);
-        json.addProperty("stream", true);
-        if (protocol == SiteProtocol.CHAT_COMPLETIONS) {
-            JsonObject options = json.has("stream_options") && json.get("stream_options").isJsonObject()
-                    ? json.getAsJsonObject("stream_options") : new JsonObject();
-            options.addProperty("include_usage", true);
-            json.add("stream_options", options);
-        }
-        return json.toString().getBytes(StandardCharsets.UTF_8);
-    }
-
-    static byte[] removeStreamFields(SiteProtocol protocol, byte[] body) throws ProtocolException {
-        JsonObject json = parseBody(body);
-        json.addProperty("stream", false);
-        if (protocol == SiteProtocol.CHAT_COMPLETIONS) {
-            json.remove("stream_options");
-        }
-        return json.toString().getBytes(StandardCharsets.UTF_8);
-    }
-
-    private static JsonObject parseBody(byte[] body) throws ProtocolException {
-        try {
-            JsonElement element = JsonParser.parseString(new String(body, StandardCharsets.UTF_8));
-            if (!element.isJsonObject()) {
-                throw new ProtocolException("Encoded request body is not a JSON object");
-            }
-            return element.getAsJsonObject();
-        } catch (ProtocolException e) {
-            throw e;
-        } catch (RuntimeException e) {
-            throw new ProtocolException("Encoded request body is not valid JSON", e);
         }
     }
 

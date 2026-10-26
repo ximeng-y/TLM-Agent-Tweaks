@@ -200,7 +200,7 @@ class StreamingHttpTransportTest {
         });
         hanging.start();
         try {
-            SiteThrottleScheduler gate = new SiteThrottleScheduler(Duration.ofMillis(10), Duration.ofMillis(10));
+            SiteThrottleScheduler gate = new SiteThrottleScheduler(Duration.ofMillis(10));
             StreamingHttpTransport transport = new StreamingHttpTransport(Duration.ofMillis(300), gate);
             List<TransportNotice> notices = new CopyOnWriteArrayList<>();
             HttpRequest request = HttpRequest.newBuilder(URI.create(
@@ -208,7 +208,7 @@ class StreamingHttpTransportTest {
                     .timeout(Duration.ofMillis(300))
                     .POST(HttpRequest.BodyPublishers.ofString(chatRequestBody())).build();
             StreamingHttpTransport.Call call = transport.prepare(client(),
-                    StreamingHttpTransport.freeze(request), SiteProtocol.CHAT_COMPLETIONS, null,
+                    FrozenRequest.freeze(request), SiteProtocol.CHAT_COMPLETIONS, null,
                     "timeout-site", null, enabledPolicy(), new StreamingHttpTransport.AttemptListener() {
                         @Override
                         public void onScheduled(StreamingHttpTransport.AttemptListener.Stage stage,
@@ -272,7 +272,7 @@ class StreamingHttpTransportTest {
         });
         stalling.start();
         try {
-            SiteThrottleScheduler gate = new SiteThrottleScheduler(Duration.ofMillis(10), Duration.ofMillis(10));
+            SiteThrottleScheduler gate = new SiteThrottleScheduler(Duration.ofMillis(10));
             StreamingHttpTransport transport = new StreamingHttpTransport(Duration.ofMillis(300), gate);
             List<TransportNotice> notices = new CopyOnWriteArrayList<>();
             HttpRequest request = HttpRequest.newBuilder(URI.create(
@@ -280,7 +280,7 @@ class StreamingHttpTransportTest {
                     .timeout(Duration.ofSeconds(5))
                     .POST(HttpRequest.BodyPublishers.ofString(chatRequestBody())).build();
             StreamingHttpTransport.Call call = transport.prepare(client(),
-                    StreamingHttpTransport.freeze(request), SiteProtocol.CHAT_COMPLETIONS, null,
+                    FrozenRequest.freeze(request), SiteProtocol.CHAT_COMPLETIONS, null,
                     "stalled-json-site", null, enabledPolicy(), new StreamingHttpTransport.AttemptListener() {
                         @Override
                         public void onScheduled(StreamingHttpTransport.AttemptListener.Stage stage,
@@ -333,7 +333,7 @@ class StreamingHttpTransportTest {
         });
         empty.start();
         try {
-            SiteThrottleScheduler gate = new SiteThrottleScheduler(Duration.ofMillis(10), Duration.ofMillis(10));
+            SiteThrottleScheduler gate = new SiteThrottleScheduler(Duration.ofMillis(10));
             StreamingHttpTransport transport = new StreamingHttpTransport(Duration.ofSeconds(5), gate);
             List<TransportNotice> notices = new CopyOnWriteArrayList<>();
             HttpRequest request = HttpRequest.newBuilder(URI.create(
@@ -341,7 +341,7 @@ class StreamingHttpTransportTest {
                     .timeout(Duration.ofSeconds(5))
                     .POST(HttpRequest.BodyPublishers.ofString(chatRequestBody())).build();
             StreamingHttpTransport.Call call = transport.prepare(client(),
-                    StreamingHttpTransport.freeze(request), SiteProtocol.CHAT_COMPLETIONS, null,
+                    FrozenRequest.freeze(request), SiteProtocol.CHAT_COMPLETIONS, null,
                     "empty-json-site", null, enabledPolicy(), new StreamingHttpTransport.AttemptListener() {
                         @Override
                         public void onScheduled(StreamingHttpTransport.AttemptListener.Stage stage,
@@ -384,11 +384,11 @@ class StreamingHttpTransportTest {
             nonStreamCalls.incrementAndGet();
             chatJson(exchange, false);
         });
-        SiteThrottleScheduler gate = new SiteThrottleScheduler(Duration.ofSeconds(5), Duration.ofSeconds(5));
+        SiteThrottleScheduler gate = new SiteThrottleScheduler(Duration.ofSeconds(5));
         List<Boolean> sendStarts = new CopyOnWriteArrayList<>();
         StreamingHttpTransport transport = new StreamingHttpTransport(null, gate);
         StreamingHttpTransport.Call call = transport.prepare(client(),
-                StreamingHttpTransport.freeze(request("/header-reset-disabled")),
+                FrozenRequest.freeze(request("/header-reset-disabled")),
                 SiteProtocol.CHAT_COMPLETIONS, null, "test-site", null,
                 RequestRetryPolicy.DISABLED, new StreamingHttpTransport.AttemptListener() {
                     @Override
@@ -493,7 +493,7 @@ class StreamingHttpTransportTest {
         });
         try {
             StreamingHttpTransport.Call call = new StreamingHttpTransport(Duration.ofSeconds(2))
-                    .sendCall(client(), StreamingHttpTransport.freeze(request("/keepalive")),
+                    .sendCall(client(), FrozenRequest.freeze(request("/keepalive")),
                             SiteProtocol.CHAT_COMPLETIONS, new ProtocolStreamRequestListener() {
                                 @Override
                                 public void onEvent(String id, StreamEventType type, String text) {
@@ -540,7 +540,7 @@ class StreamingHttpTransportTest {
                             "http://127.0.0.1:" + parallel.getAddress().getPort() + "/"))
                     .POST(HttpRequest.BodyPublishers.ofString(chatRequestBody())).build();
             HttpResponse<String> response = new StreamingHttpTransport(Duration.ofMillis(500))
-                    .send(client(), StreamingHttpTransport.freeze(request), SiteProtocol.CHAT_COMPLETIONS,
+                    .send(client(), FrozenRequest.freeze(request), SiteProtocol.CHAT_COMPLETIONS,
                             null).get(3, TimeUnit.SECONDS);
             assertEquals(200, response.statusCode());
             assertEquals(1, fallbacks.get());
@@ -712,8 +712,8 @@ class StreamingHttpTransportTest {
 
     @Test
     void rateLimitErrorsAreNotRetried() throws Exception {
-        assertFalse(StreamingHttpTransport.shouldRetryWithoutStream(400, "upstream returned invalid model"));
-        assertTrue(StreamingHttpTransport.shouldRetryWithoutStream(400, "stream_options is unsupported"));
+        assertFalse(HttpRetryRules.shouldRetryWithoutStream(400, "upstream returned invalid model"));
+        assertTrue(HttpRetryRules.shouldRetryWithoutStream(400, "stream_options is unsupported"));
         server.removeContext("/stream");
         server.createContext("/stream", exchange -> {
             streamCalls.incrementAndGet();
@@ -795,7 +795,7 @@ class StreamingHttpTransportTest {
         });
         StreamingHttpTransport transport = new StreamingHttpTransport(Duration.ofSeconds(30));
         HttpRequest request = request("/stream");
-        StreamingHttpTransport.Call call = transport.sendCall(client(), StreamingHttpTransport.freeze(request),
+        StreamingHttpTransport.Call call = transport.sendCall(client(), FrozenRequest.freeze(request),
                 SiteProtocol.CHAT_COMPLETIONS, null);
         assertTrue(started.await(5, TimeUnit.SECONDS));
         call.cancel();
@@ -830,7 +830,7 @@ class StreamingHttpTransportTest {
         StreamingHttpTransport transport = new StreamingHttpTransport(Duration.ofMillis(400));
         long start = System.nanoTime();
         ExecutionException error = assertThrows(ExecutionException.class, () ->
-                transport.send(client(), StreamingHttpTransport.freeze(request("/stream")),
+                transport.send(client(), FrozenRequest.freeze(request("/stream")),
                         SiteProtocol.CHAT_COMPLETIONS, null).get(5, TimeUnit.SECONDS));
         long elapsedMillis = (System.nanoTime() - start) / 1_000_000;
         assertTrue(entered.await(1, TimeUnit.SECONDS));
@@ -925,7 +925,7 @@ class StreamingHttpTransportTest {
                                               List<TransportNotice> notices,
                                               List<Boolean> sendStarts,
                                               AtomicInteger transportRetried) throws Exception {
-        SiteThrottleScheduler gate = new SiteThrottleScheduler(policy.siteSpacing(), policy.retryDelay());
+        SiteThrottleScheduler gate = new SiteThrottleScheduler(policy.siteSpacing());
         StreamingHttpTransport transport = new StreamingHttpTransport(Duration.ofSeconds(5), gate);
         ProtocolStreamRequestListener listener = new ProtocolStreamRequestListener() {
             @Override
@@ -947,7 +947,7 @@ class StreamingHttpTransportTest {
             }
         };
         StreamingHttpTransport.Call call = transport.prepare(client(),
-                StreamingHttpTransport.freeze(request(path)), SiteProtocol.CHAT_COMPLETIONS,
+                FrozenRequest.freeze(request(path)), SiteProtocol.CHAT_COMPLETIONS,
                 listener, "test-site", null, policy, attemptListener);
         call.start();
         try {
@@ -992,7 +992,7 @@ class StreamingHttpTransportTest {
             }
         };
         HttpRequest request = request(requestPath);
-        return new StreamingHttpTransport().send(client(), StreamingHttpTransport.freeze(request),
+        return new StreamingHttpTransport().send(client(), FrozenRequest.freeze(request),
                 protocol, listener).get(10, TimeUnit.SECONDS);
     }
 
@@ -1000,7 +1000,7 @@ class StreamingHttpTransportTest {
             SiteProtocol protocol, String path, String scenario) throws Exception {
         String requestPath = uniqueScenarioPath(scenario);
         return new StreamingHttpTransport().send(client(),
-                StreamingHttpTransport.freeze(request(requestPath)), protocol, null);
+                FrozenRequest.freeze(request(requestPath)), protocol, null);
     }
 
     private String uniqueScenarioPath(String scenario) {
