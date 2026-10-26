@@ -7,8 +7,10 @@ import com.github.tartaricacid.touhoulittlemaid.client.gui.widget.button.FlatCol
 import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
 import com.xm2nd.tlmagenttweaks.client.gui.LLMSiteProtocolScreen;
 import com.xm2nd.tlmagenttweaks.client.gui.PriceConfigScreen;
+import com.xm2nd.tlmagenttweaks.client.gui.ThinkingConfigScreen;
 import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
 import com.xm2nd.tlmagenttweaks.common.protocol.UrlMode;
+import com.xm2nd.tlmagenttweaks.common.thinking.ModelThinkingConfig;
 import com.xm2nd.tlmagenttweaks.protocol.ProtocolBridge;
 import com.xm2nd.tlmagenttweaks.protocol.ProtocolLLMSite;
 import net.minecraft.client.Minecraft;
@@ -26,16 +28,22 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
- * 在 TLM 的 LLM 站点编辑器中注入站点协议与单模型价格两个入口。
+ * 在 TLM 的 LLM 站点编辑器中注入站点协议、单模型价格与思考配置三个入口。
  * <p>
- * 协议按钮放在 URL 输入框右侧（缩短 URL 宽度，不越出面板）；价格按钮放在每行模型
- * 删除按钮左侧，不再占用底部原生按钮行。原始输入框、模型区、滚动、添加/保存/返回
- * 按钮布局保持不变。
+ * 协议按钮放在 URL 输入框右侧（缩短 URL 宽度，不越出面板）；价格与思考配置按钮放在
+ * 每行模型删除按钮左侧，不再占用底部原生按钮行。原始输入框、模型区、滚动、
+ * 添加/保存/返回按钮布局保持不变。
  */
 @Mixin(LLMSiteEditorScreen.class)
 public abstract class LLMSiteEditorScreenMixin {
@@ -59,6 +67,10 @@ public abstract class LLMSiteEditorScreenMixin {
 
     @Unique
     private UrlMode tlmAgentTweaks$urlMode;
+
+    /** 每模型思考配置暂存：以模型名文本为键，随 buildSite 一起写回站点。 */
+    @Unique
+    private final Map<String, ModelThinkingConfig> tlmAgentTweaks$thinkingConfigs = new HashMap<>();
 
     @Inject(method = "init", at = @At("TAIL"), remap = false)
     private void tlmAgentTweaks$addSiteButtons(CallbackInfo ci) {
@@ -127,9 +139,13 @@ public abstract class LLMSiteEditorScreenMixin {
             if (reasoningButton != null) {
                 reasoningButton.setX(priceX - 2 - 60);
             }
+            // 思考配置正方形按钮：放在价格/推理按钮链的最左侧
+            int anchorLeft = reasoningButton != null ? reasoningButton.getX() : priceX;
+            int squareX = anchorLeft - 2 - 18;
+
             // 据此缩短模型名输入框：真实起点是 rowLeft+6（box.getX()），按该起点算宽，
             // 保证输入框右缘停在按钮左侧 2px，不覆盖价格/思考按钮
-            int nameEnd = (reasoningButton != null ? reasoningButton.getX() : priceX) - 2;
+            int nameEnd = squareX - 2;
             box.setWidth(Math.max(40, nameEnd - box.getX()));
 
             final EditBox modelBox = box;
@@ -140,6 +156,18 @@ public abstract class LLMSiteEditorScreenMixin {
                             this.siteIdInput == null ? "" : this.siteIdInput.getValue().trim(),
                             modelBox.getValue().trim(), screen)));
             addRenderableWidgetReflect(screen, priceButton);
+
+            FlatColorButton thinkingButton = new FlatColorButton(
+                    squareX, rowY - 4, 18, 18,
+                    Component.literal("🧠"),
+                    b -> Minecraft.getInstance().setScreen(new ThinkingConfigScreen(
+                            screen,
+                            modelBox.getValue().trim(),
+                            this.tlmAgentTweaks$thinkingConfigs.get(modelBox.getValue().trim()),
+                            config -> this.tlmAgentTweaks$thinkingConfigs.put(
+                                    modelBox.getValue().trim(), config))))
+                    .setTooltips("gui.tlm_agent_tweaks.button.thinking.tip");
+            addRenderableWidgetReflect(screen, thinkingButton);
         }
     }
 
@@ -148,7 +176,58 @@ public abstract class LLMSiteEditorScreenMixin {
         LLMSite built = cir.getReturnValue();
         if (built instanceof LLMOpenAISite openAiSite) {
             cir.setReturnValue(ProtocolBridge.withProtocol(openAiSite,
-                    this.tlmAgentTweaks$protocol, this.tlmAgentTweaks$urlMode));
+                    this.tlmAgentTweaks$protocol, this.tlmAgentTweaks$urlMode,
+                    tlmAgentTweaks$filterThinkingConfigs()));
+        }
+    }
+
+    /**
+     * buildSite 时按当前模型行文本过滤思考配置：模型改名后旧键不再随站点持久化。
+     * 过滤只作用于本次写回的副本，不动界面暂存，编辑器内把名字改回来配置仍在。
+     */
+    @Unique
+    private Map<String, ModelThinkingConfig> tlmAgentTweaks$filterThinkingConfigs() {
+        Map<String, ModelThinkingConfig> configs = this.tlmAgentTweaks$thinkingConfigs;
+        if (configs.isEmpty()) {
+            return configs;
+        }
+        Set<String> rowTexts = tlmAgentTweaks$currentRowModelTexts();
+        if (rowTexts == null) {
+            return configs;
+        }
+        Map<String, ModelThinkingConfig> filtered = new LinkedHashMap<>();
+        for (Map.Entry<String, ModelThinkingConfig> entry : configs.entrySet()) {
+            if (rowTexts.contains(entry.getKey())) {
+                filtered.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return filtered;
+    }
+
+    /**
+     * 收集当前全部模型行的文本（含滚动隐藏行，与 buildSite 的取值范围一致；键做 trim，
+     * 与 thinkingConfigs 的写入键一致）。ModelRow 是 TLM 的私有嵌套类且不在重映射集里，
+     * 字符串反射在 dev/prod 均稳定；反射失败返回 null，调用方跳过过滤保持原有行为。
+     */
+    @Unique
+    private Set<String> tlmAgentTweaks$currentRowModelTexts() {
+        try {
+            Field rowsField = LLMSiteEditorScreen.class.getDeclaredField("modelRows");
+            rowsField.setAccessible(true);
+            List<?> modelRows = (List<?>) rowsField.get(this);
+            Method nameMethod = modelRows.isEmpty() ? null
+                    : modelRows.get(0).getClass().getDeclaredMethod("name");
+            Set<String> texts = new HashSet<>();
+            for (Object row : modelRows) {
+                String value = (String) nameMethod.invoke(row);
+                if (value != null && !value.isBlank()) {
+                    texts.add(value.trim());
+                }
+            }
+            return texts;
+        } catch (ReflectiveOperationException e) {
+            TlmAgentTweaks.LOGGER.warn("Failed to read model rows from LLMSiteEditorScreen", e);
+            return null;
         }
     }
 
@@ -160,6 +239,8 @@ public abstract class LLMSiteEditorScreenMixin {
         if (this.sourceSite instanceof ProtocolLLMSite protocolSite) {
             this.tlmAgentTweaks$protocol = protocolSite.protocol();
             this.tlmAgentTweaks$urlMode = protocolSite.urlMode();
+            this.tlmAgentTweaks$thinkingConfigs.clear();
+            this.tlmAgentTweaks$thinkingConfigs.putAll(protocolSite.thinkingConfigs());
         } else if (this.createMode) {
             this.tlmAgentTweaks$protocol = SiteProtocol.CHAT_COMPLETIONS;
             this.tlmAgentTweaks$urlMode = UrlMode.BASE;

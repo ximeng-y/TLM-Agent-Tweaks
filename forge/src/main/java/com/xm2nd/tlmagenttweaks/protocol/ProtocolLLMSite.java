@@ -12,10 +12,14 @@ import org.apache.commons.lang3.StringUtils;
 import com.xm2nd.tlmagenttweaks.common.protocol.ProtocolSiteConfig;
 import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
 import com.xm2nd.tlmagenttweaks.common.protocol.UrlMode;
+import com.xm2nd.tlmagenttweaks.common.thinking.ModelThinkingConfig;
+import com.xm2nd.tlmagenttweaks.common.thinking.ThinkingLevel;
 
 import java.util.List;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -23,17 +27,27 @@ import java.util.stream.Collectors;
  * 带协议配置的 TLM OpenAI 兼容站点。
  * <p>
  * 继承原 {@link LLMOpenAISite}，从而不改变 TLM 的类型判断、客户端工厂和模型选择逻辑。
+ * 在协议字段之外还携带每模型的思考配置（可开关 + 允许的思考强度），随站点一起持久化。
  */
 public class ProtocolLLMSite extends LLMOpenAISite {
     private final SiteProtocol protocol;
     private final UrlMode urlMode;
+    private final Map<String, ModelThinkingConfig> thinkingConfigs;
 
     public ProtocolLLMSite(String id, ResourceLocation icon, String url, boolean enabled, String secretKey,
                            boolean hasThinkingField, Map<String, String> headers,
                            Map<String, ModelEntry> modelEntries, SiteProtocol protocol, UrlMode urlMode) {
+        this(id, icon, url, enabled, secretKey, hasThinkingField, headers, modelEntries, protocol, urlMode, Map.of());
+    }
+
+    public ProtocolLLMSite(String id, ResourceLocation icon, String url, boolean enabled, String secretKey,
+                           boolean hasThinkingField, Map<String, String> headers,
+                           Map<String, ModelEntry> modelEntries, SiteProtocol protocol, UrlMode urlMode,
+                           Map<String, ModelThinkingConfig> thinkingConfigs) {
         super(id, icon, url, enabled, secretKey, hasThinkingField, headers, new HashMap<>(modelEntries));
         this.protocol = protocol;
         this.urlMode = urlMode;
+        this.thinkingConfigs = thinkingConfigs == null ? Map.of() : Map.copyOf(thinkingConfigs);
     }
 
     public ProtocolLLMSite(String id, ResourceLocation icon, String url, boolean enabled, String secretKey,
@@ -42,6 +56,7 @@ public class ProtocolLLMSite extends LLMOpenAISite {
         super(id, icon, url, enabled, secretKey, hasThinkingField, headers, modelEntries);
         this.protocol = protocol;
         this.urlMode = urlMode;
+        this.thinkingConfigs = Map.of();
     }
 
     public SiteProtocol protocol() {
@@ -50,6 +65,10 @@ public class ProtocolLLMSite extends LLMOpenAISite {
 
     public UrlMode urlMode() {
         return urlMode;
+    }
+
+    public Map<String, ModelThinkingConfig> thinkingConfigs() {
+        return thinkingConfigs;
     }
 
     public static class Serializer extends LLMOpenAISite.Serializer {
@@ -65,6 +84,26 @@ public class ProtocolLLMSite extends LLMOpenAISite {
                         .orElseGet(() -> DataResult.error(() -> "Unknown URL mode: " + id)),
                 UrlMode::id);
 
+        private static final Codec<ModelThinkingConfig> THINKING_CONFIG_CODEC = RecordCodecBuilder.create(
+                instance -> instance.group(
+                        Codec.BOOL.fieldOf("toggle_allowed").forGetter(ModelThinkingConfig::toggleAllowed),
+                        Codec.STRING.listOf().fieldOf("levels").forGetter(config -> config.levels().stream()
+                                .map(ThinkingLevel::id).toList())
+                ).apply(instance, ProtocolLLMSite.Serializer::decodeThinkingConfig));
+
+        private static final String THINKING_CONFIG = "thinking_config";
+
+        private static ModelThinkingConfig decodeThinkingConfig(boolean toggleAllowed, List<String> levels) {
+            Set<ThinkingLevel> parsed = new LinkedHashSet<>();
+            for (String id : levels) {
+                ThinkingLevel level = ThinkingLevel.fromId(id);
+                if (level != null) {
+                    parsed.add(level);
+                }
+            }
+            return new ModelThinkingConfig(toggleAllowed, parsed);
+        }
+
         public static final Codec<LLMOpenAISite> CODEC = RecordCodecBuilder.create(instance -> instance.group(
                 Codec.STRING.fieldOf(ID).forGetter(LLMOpenAISite::id),
                 ResourceLocation.CODEC.fieldOf(ICON).forGetter(LLMOpenAISite::icon),
@@ -79,7 +118,11 @@ public class ProtocolLLMSite extends LLMOpenAISite {
                                 ? configured.protocol() : ProtocolSiteConfig.LEGACY_PROTOCOL),
                 URL_MODE_CODEC.optionalFieldOf(ProtocolSiteConfig.URL_MODE, ProtocolSiteConfig.LEGACY_URL_MODE)
                         .forGetter(site -> site instanceof ProtocolLLMSite configured
-                                ? configured.urlMode() : ProtocolSiteConfig.LEGACY_URL_MODE)
+                                ? configured.urlMode() : ProtocolSiteConfig.LEGACY_URL_MODE),
+                Codec.unboundedMap(Codec.STRING, THINKING_CONFIG_CODEC)
+                        .optionalFieldOf(THINKING_CONFIG, Map.of())
+                        .forGetter(site -> site instanceof ProtocolLLMSite configured
+                                ? configured.thinkingConfigs() : Map.of())
         ).apply(instance, ProtocolLLMSite::new));
 
         @Override
