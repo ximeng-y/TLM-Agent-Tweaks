@@ -4,11 +4,15 @@ import com.github.tartaricacid.touhoulittlemaid.ai.manager.entity.LLMCallback;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.ErrorCode;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.ResponseCallback;
 import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
+import com.xm2nd.tlmagenttweaks.common.TokenRequestContext;
+import com.xm2nd.tlmagenttweaks.common.TokenStatsHttpResponse;
 import com.xm2nd.tlmagenttweaks.common.protocol.SiteProtocol;
+import com.xm2nd.tlmagenttweaks.common.stream.FrozenRequest;
 import com.xm2nd.tlmagenttweaks.common.stream.RequestRetryPolicy;
 import com.xm2nd.tlmagenttweaks.common.stream.SiteThrottleScheduler;
 import com.xm2nd.tlmagenttweaks.common.stream.StreamingHttpTransport;
 import com.xm2nd.tlmagenttweaks.protocol.ProtocolBridge;
+import com.xm2nd.tlmagenttweaks.stats.TokenStatsService;
 import com.xm2nd.tlmagenttweaks.thinking.ThinkingDisplayService;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.neoforge.server.ServerLifecycleHooks;
@@ -17,13 +21,12 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * NeoForge 侧请求出口：冻结请求、接入只读事件中心、登记取消句柄与整轮预算。
@@ -32,16 +35,16 @@ import java.util.concurrent.ConcurrentHashMap;
  * （状态码重试与非流式回退），因此这里只需要登记一次取消句柄。
  * <p>
  * 统一终态：正常完成、失败完成、静默取消、预算到期都在本桥上收口。
- * 终态由单一弱引用状态 {@link #TERMINAL} 决定（值见 {@link #STATE_FINISHED} 等常量），
- * 设置后不再清除，只随回调对象被回收而消失。
+ * 每个回调的终态标记、超时派发许可与在途登记集中在 {@link RoundState} 上，
+ * 存于弱引用登记表 {@link #ROUNDS}；终态设置后不再清除，只随回调对象被回收而消失。
  * <p>
  * 完成与超时的竞争认领是原子的：响应线程认领 {@code finished}、deadline 线程认领
- * {@code timed_out}，两者用 {@code putIfAbsent} 抢占同一个状态位，只有一个获胜者
- * 拥有唯一派发权，避免「响应被超时吞掉、超时被完成吞掉」的双杀交错。
+ * {@code timed_out}，两者抢写同一个状态位，只有一个获胜者拥有唯一派发权，
+ * 避免「响应被超时吞掉、超时被完成吞掉」的双杀交错。
  * 显式 {@code cancel} / {@code complete} 是业务主动动作，强制覆盖任何竞争状态，
  * 从而抑制尚未派发的超时/成功/失败通知。
  * <p>
- * 不维护 per-maid 的第二个索引：按女仆取消时直接遍历请求规模很小的 {@link #PENDING}
+ * 不维护 per-maid 的第二个索引：按女仆取消时直接遍历规模很小的 {@link #ROUNDS}
  * 并按不可变 maidId 过滤，避免异步 unregister 与主线程取消并发读写集合。
  */
 public final class ProtocolHttpBridge {
@@ -50,28 +53,17 @@ public final class ProtocolHttpBridge {
     }
 
     /** 站点级发送调度器：跨请求共享，进程内单例。 */
-    private static final SiteThrottleScheduler GATE = new SiteThrottleScheduler(
-            RetrySettings.SITE_SPACING, RetrySettings.RETRY_DELAY);
+    private static final SiteThrottleScheduler GATE = new SiteThrottleScheduler(RetrySettings.SITE_SPACING);
     private static final StreamingHttpTransport TRANSPORT = new StreamingHttpTransport(null, GATE);
-    private static final Map<LLMCallback, Entry> PENDING = new ConcurrentHashMap<>();
     /**
-     * 终态状态机：弱引用，键为回调实例。值仅允许 {@link #STATE_FINISHED}、
-     * {@link #STATE_COMPLETED}、{@link #STATE_TIMED_OUT}、{@link #STATE_CANCELLED}；
-     * 空值表示仍在运行。finished 保留结果派发资格，completed 表示业务主动结束、禁止派发。
-     * 竞争认领（完成/超时）用 {@code putIfAbsent} 抢占，只产生一个获胜者；
-     * 业务 cancel / complete 用强制写入覆盖竞争状态。
+     * 单轮对话登记表：键为回调实例（弱引用）。每个 {@link RoundState} 只在
+     * {@code synchronized (ROUNDS)} 内读写，因此读-改-写（认领、覆盖、清登记）都是原子的。
      */
-    private static final Map<LLMCallback, String> TERMINAL = new WeakHashMap<>();
+    private static final Map<LLMCallback, RoundState> ROUNDS = new WeakHashMap<>();
     private static final String STATE_FINISHED = "finished";
     private static final String STATE_COMPLETED = "completed";
     private static final String STATE_TIMED_OUT = "timed_out";
     private static final String STATE_CANCELLED = "cancelled";
-    /**
-     * 超时派发许可：值保留唯一一次派发的超时异常对象，作为合法超时通知的识别许可。
-     * 只上报一次最终失败；许可消耗后值置 null，但键保留（弱引用），迟到结果仍被丢弃。
-     */
-    private static final Map<LLMCallback, Throwable> TIMED_OUT_FAILURE =
-            Collections.synchronizedMap(new WeakHashMap<>());
     private static volatile boolean stopping;
 
     private ProtocolHttpBridge() {
@@ -94,7 +86,9 @@ public final class ProtocolHttpBridge {
         // 展示句柄随本次请求新建：新一轮请求清空旧思考并回到思考阶段。
         ThinkingDisplayService.Handle displayHandle = ThinkingDisplayService.beginRequest(callback);
         ProtocolStreamListener listener = new ProtocolStreamListener(site, callback, displayHandle);
-        StreamingHttpTransport.FrozenRequest frozen = StreamingHttpTransport.freeze(request);
+        FrozenRequest frozen = FrozenRequest.freeze(request);
+        // 统计归因快照在冻结之后捕获：本次调用的重试与流式回退共享同一份，工具续接的新请求另行捕获。
+        TokenRequestContext statsContext = TokenStatsService.captureRequest(callback, site, frozen.body());
         String siteId = site == null ? null : site.id();
         // 提示器随本次请求的配置快照构造，配置在请求进行中被改动不影响本轮。
         RetryNotifier notifier = new RetryNotifier(callback, policy, displayHandle);
@@ -113,7 +107,12 @@ public final class ProtocolHttpBridge {
             return call.future();
         }
         call.start();
-        return call.future().whenComplete((response, throwable) -> notifier.stopNotifications());
+        CompletableFuture<HttpResponse<String>> future =
+                call.future().whenComplete((response, throwable) -> notifier.stopNotifications());
+        // 无快照时原样返回；异常完成不经过 thenApply，不会被包装
+        return statsContext == null ? future
+                : future.thenApply(response -> response == null ? null
+                        : new TokenStatsHttpResponse(statsContext, response));
     }
 
     public static boolean isInactive(LLMCallback callback) {
@@ -132,9 +131,11 @@ public final class ProtocolHttpBridge {
         if (callback == null) {
             return;
         }
-        synchronized (PENDING) {
-            Entry entry = new Entry(maidId(callback), handle, notifier);
-            Entry previous = PENDING.put(callback, entry);
+        synchronized (ROUNDS) {
+            RoundState round = roundFor(callback);
+            Entry entry = new Entry(handle, notifier);
+            Entry previous = round.pending;
+            round.pending = entry;
             if (previous != null) {
                 previous.notifier.finish();
             }
@@ -144,14 +145,33 @@ public final class ProtocolHttpBridge {
         }
     }
 
-    /** 读取回调的终态状态；空值表示仍在运行。与认领/覆盖共用 {@link #TERMINAL} 同一把锁，保证读-写原子。 */
+    /** 取出并清除该回调的在途登记；没有登记或回调已被回收时返回 {@code null}。 */
+    private static Entry takePending(LLMCallback callback) {
+        synchronized (ROUNDS) {
+            RoundState round = ROUNDS.get(callback);
+            if (round == null) {
+                return null;
+            }
+            Entry entry = round.pending;
+            round.pending = null;
+            return entry;
+        }
+    }
+
+    /** 读取回调的终态状态；空值表示仍在运行。与认领/覆盖共用 {@link #ROUNDS} 同一把锁，保证读-写原子。 */
     private static String stateOf(LLMCallback callback) {
         if (callback == null) {
             return null;
         }
-        synchronized (TERMINAL) {
-            return TERMINAL.get(callback);
+        synchronized (ROUNDS) {
+            RoundState round = ROUNDS.get(callback);
+            return round == null ? null : round.terminal;
         }
+    }
+
+    /** 取该回调的单轮状态，没有则建立（maidId 在建立时固定）。必须在 {@code synchronized (ROUNDS)} 内调用。 */
+    private static RoundState roundFor(LLMCallback callback) {
+        return ROUNDS.computeIfAbsent(callback, key -> new RoundState(maidId(key)));
     }
 
     /**
@@ -163,8 +183,13 @@ public final class ProtocolHttpBridge {
         if (callback == null) {
             return false;
         }
-        synchronized (TERMINAL) {
-            return TERMINAL.putIfAbsent(callback, state) == null;
+        synchronized (ROUNDS) {
+            RoundState round = roundFor(callback);
+            if (round.terminal != null) {
+                return false;
+            }
+            round.terminal = state;
+            return true;
         }
     }
 
@@ -173,9 +198,10 @@ public final class ProtocolHttpBridge {
         if (callback == null) {
             return;
         }
-        synchronized (TERMINAL) {
-            if (!STATE_CANCELLED.equals(TERMINAL.get(callback))) {
-                TERMINAL.put(callback, state);
+        synchronized (ROUNDS) {
+            RoundState round = roundFor(callback);
+            if (!STATE_CANCELLED.equals(round.terminal)) {
+                round.terminal = state;
             }
         }
     }
@@ -184,7 +210,7 @@ public final class ProtocolHttpBridge {
      * 关闭该回调整轮登记：移除在途登记、关闭 deadline 与后续等待提示、释放整轮预算。
      * 幂等；不发送成功或失败回调，不操作历史/业务 pending/互聊链/气泡。
      * <p>
-     * 业务自决结束（{@link LlmConversationLifecycle#complete}）时强制打完成标记，
+     * 业务自决结束（{@code LlmConversationLifecycle#complete}）时强制打完成标记，
      * 覆盖竞争状态并抑制尚未派发的通知。仅用于业务主动 complete；
      * 超时自身的收尾路径不得走这里（会覆盖 {@link #STATE_TIMED_OUT}），由
      * callbacks 兜底入口在 `wasTimedOut` 时跳过。
@@ -219,8 +245,9 @@ public final class ProtocolHttpBridge {
      * 按女仆一刀切会把它们一起静默取消。
      */
     private static void onBudgetExpired(LLMCallback callback, Entry expected, HttpRequest request) {
-        synchronized (PENDING) {
-            if (PENDING.get(callback) != expected) {
+        synchronized (ROUNDS) {
+            RoundState round = ROUNDS.get(callback);
+            if (round == null || round.pending != expected) {
                 return;
             }
             expire(callback, request);
@@ -235,11 +262,13 @@ public final class ProtocolHttpBridge {
     private static void expire(LLMCallback callback, HttpRequest request) {
         Throwable failure = timeoutFailure();
         // 竞争认领：若响应线程已认领 finished 或业务已取消，这里立即放弃。
-        if (!claimTerminal(callback, STATE_TIMED_OUT)) {
-            return;
-        }
-        synchronized (TIMED_OUT_FAILURE) {
-            TIMED_OUT_FAILURE.put(callback, failure);
+        synchronized (ROUNDS) {
+            RoundState round = roundFor(callback);
+            if (round.terminal != null) {
+                return;
+            }
+            round.terminal = STATE_TIMED_OUT;
+            round.timeoutLicense = failure;
         }
         releaseResources(callback);
         try {
@@ -274,11 +303,12 @@ public final class ProtocolHttpBridge {
         if (callback == null) {
             return false;
         }
-        if (!wasTimedOut(callback)) {
-            return true;
-        }
-        synchronized (TIMED_OUT_FAILURE) {
-            return TIMED_OUT_FAILURE.get(callback) == failure;
+        synchronized (ROUNDS) {
+            RoundState round = ROUNDS.get(callback);
+            if (round == null || !STATE_TIMED_OUT.equals(round.terminal)) {
+                return true;
+            }
+            return round.timeoutLicense == failure;
         }
     }
 
@@ -287,9 +317,10 @@ public final class ProtocolHttpBridge {
         if (callback == null) {
             return;
         }
-        synchronized (TIMED_OUT_FAILURE) {
-            if (TIMED_OUT_FAILURE.get(callback) == failure) {
-                TIMED_OUT_FAILURE.put(callback, null);
+        synchronized (ROUNDS) {
+            RoundState round = ROUNDS.get(callback);
+            if (round != null && round.timeoutLicense == failure) {
+                round.timeoutLicense = null;
             }
         }
     }
@@ -366,10 +397,16 @@ public final class ProtocolHttpBridge {
             return;
         }
         String target = maidId.toString();
-        for (Map.Entry<LLMCallback, Entry> entry : List.copyOf(PENDING.entrySet())) {
-            if (target.equals(entry.getValue().maidId)) {
-                cancel(entry.getKey());
+        List<LLMCallback> targets = new ArrayList<>();
+        synchronized (ROUNDS) {
+            for (Map.Entry<LLMCallback, RoundState> entry : ROUNDS.entrySet()) {
+                if (entry.getValue().pending != null && target.equals(entry.getValue().maidId)) {
+                    targets.add(entry.getKey());
+                }
             }
+        }
+        for (LLMCallback callback : targets) {
+            cancel(callback);
         }
     }
 
@@ -384,16 +421,24 @@ public final class ProtocolHttpBridge {
     }
 
     /**
-     * 作废全部在途请求并清空登记表，但不取消整轮预算。
+     * 作废全部在途请求并清空登记，但不取消整轮预算。
      * <p>
      * 停服时由 {@link #cancelAll()} 连预算一起作废；单次对话被全局打断时只作废请求，
      * 使同一次对话的后续轮次仍受原截止时间约束，而不是重新获得完整的 240 秒。
      */
     static void invalidateAll() {
-        for (LLMCallback callback : List.copyOf(PENDING.keySet())) {
+        List<LLMCallback> registered;
+        synchronized (ROUNDS) {
+            registered = new ArrayList<>();
+            for (Map.Entry<LLMCallback, RoundState> entry : ROUNDS.entrySet()) {
+                if (entry.getValue().pending != null) {
+                    registered.add(entry.getKey());
+                }
+            }
+        }
+        for (LLMCallback callback : registered) {
             cancelKeepingBudget(callback);
         }
-        PENDING.clear();
     }
 
     public static void onServerStarted() {
@@ -429,37 +474,24 @@ public final class ProtocolHttpBridge {
 
     /**
      * 静默取消单个回调：作废 HTTP/排队/重试/deadline、释放预算、禁止后续重发与结果派发。
-     * 按**原始回调对象**生效；即使当前没有 {@link #PENDING} 登记也会保留取消标记，
+     * 按**原始回调对象**生效；即使当前没有在途登记也会保留取消标记，
      * 覆盖「取消早于发送」与「HTTP 已结束但业务派发尚未执行」。幂等。
      */
     public static void cancel(LLMCallback callback) {
         if (callback == null) {
             return;
         }
-        cancelAllWith(callback, true);
-    }
-
-    /**
-     * 取消登记并清理整轮资源。显式/生命周期取消时强制写取消标记；
-     * 终态标记与预算释放先于传输句柄取消，避免同步完成的回调看到旧状态。
-     */
-    private static void cancelAllWith(LLMCallback callback, boolean markCancelled) {
-        if (markCancelled) {
-            forceTerminal(callback, STATE_CANCELLED);
-        }
+        forceTerminal(callback, STATE_CANCELLED);
         releaseResources(callback);
     }
 
     /**
      * 只作废在途请求/排队/计时器并释放预算，**不写任何终态标记**。
-     * 用于：已并发完成终态后的兜底清理（{@link #send} 后置检查）与超时/派发收尾
+     * 用于：已并发完成终态后的兜底清理（{@code send} 后置检查）与超时/派发收尾
      * （终态标记已由竞争认领或强制覆盖单独登记）。
      */
     private static void releaseResources(LLMCallback callback) {
-        Entry entry;
-        synchronized (PENDING) {
-            entry = PENDING.remove(callback);
-        }
+        Entry entry = takePending(callback);
         ProtocolRetryBudget.release(callback);
         if (entry != null) {
             entry.handle.cancel();
@@ -476,10 +508,7 @@ public final class ProtocolHttpBridge {
      */
     private static void cancelKeepingBudget(LLMCallback callback) {
         forceTerminal(callback, STATE_CANCELLED);
-        Entry entry;
-        synchronized (PENDING) {
-            entry = PENDING.remove(callback);
-        }
+        Entry entry = takePending(callback);
         if (entry != null) {
             entry.handle.cancel();
             entry.notifier.cancelDeadline();
@@ -507,13 +536,31 @@ public final class ProtocolHttpBridge {
         }
     }
 
-    private static final class Entry {
+    /** 单轮对话状态：终态标记、超时派发许可与在途登记集中在一个对象上，只在 ROUNDS 锁内读写。 */
+    private static final class RoundState {
+        /** 女仆标识（建立时固定）；按女仆取消时据此过滤。 */
         private final String maidId;
+        /** 在途登记（取消句柄与等待提示器）；发送时登记，终态清理时置空。 */
+        private Entry pending;
+        /** 终态标记：空值表示仍在运行；值见 {@link #STATE_FINISHED} 等常量。 */
+        private String terminal;
+        /**
+         * 超时派发许可：值保留唯一一次派发的超时异常对象，作为合法超时通知的识别许可。
+         * 许可消耗后置 null；条目本身随弱引用回收，迟到结果仍被丢弃。
+         */
+        private Throwable timeoutLicense;
+
+        private RoundState(String maidId) {
+            this.maidId = maidId;
+        }
+    }
+
+    /** 单轮的在途登记：取消句柄与等待提示器，随终态清理一并取空。 */
+    private static final class Entry {
         private final CancelHandle handle;
         private final RetryNotifier notifier;
 
-        private Entry(String maidId, CancelHandle handle, RetryNotifier notifier) {
-            this.maidId = maidId;
+        private Entry(CancelHandle handle, RetryNotifier notifier) {
             this.handle = handle;
             this.notifier = notifier;
         }

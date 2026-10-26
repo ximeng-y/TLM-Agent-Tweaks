@@ -11,7 +11,7 @@ import java.time.Duration;
  * @param enabled     是否启用状态码重试与站点冷却（关闭时保留 #8 的断流回退行为）
  * @param maxRetries  状态码重试的最大次数（不含首次发送）
  * @param retryDelay  每次状态码重试前的固定等待（忽略 {@code Retry-After}，不做指数退避）
- * @param siteSpacing 同一站点积压放行的最小间隔
+ * @param siteSpacing 同一站点相邻两次发送之间的最小间隔（不等待上一次响应，只约束发送节奏）
  */
 public record RequestRetryPolicy(boolean enabled, int maxRetries, Duration retryDelay, Duration siteSpacing) {
 

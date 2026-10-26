@@ -38,6 +38,8 @@ public class TokenStatsStore {
     private final ConcurrentHashMap<RowKey, TokenUsageRecord> rows = new ConcurrentHashMap<>();
     /** 有未落盘数据的月份（monthKey = year * 12 + month） */
     private final Set<Integer> dirtyMonths = ConcurrentHashMap.newKeySet();
+    /** 状态锁：保护「行累加 + 月份标脏」及「快照复制 + 脏标记移交」的原子性 */
+    private final Object stateLock = new Object();
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Type ROW_LIST_TYPE = new TypeToken<List<TokenUsageRecord>>() {
@@ -93,16 +95,18 @@ public class TokenStatsStore {
                        long epochMs) {
         int day = (int) LocalDate.ofInstant(java.time.Instant.ofEpochMilli(epochMs), ZoneId.systemDefault()).toEpochDay();
         RowKey key = new RowKey(day, ownerUuid, siteId, model);
-        rows.compute(key, (k, row) -> {
-            TokenUsageRecord r = row != null ? row : new TokenUsageRecord(day, ownerUuid, ownerName, siteId, model);
-            // 玩家名以最近一次非空为准（处理改名）
-            if (ownerName != null && !ownerName.isBlank()) {
-                r.ownerName = ownerName;
-            }
-            r.add(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
-            return r;
-        });
-        dirtyMonths.add(monthKey(day));
+        synchronized (stateLock) {
+            rows.compute(key, (k, row) -> {
+                TokenUsageRecord r = row != null ? row : new TokenUsageRecord(day, ownerUuid, ownerName, siteId, model);
+                // 玩家名以最近一次非空为准（处理改名）
+                if (ownerName != null && !ownerName.isBlank()) {
+                    r.ownerName = ownerName;
+                }
+                r.add(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
+                return r;
+            });
+            dirtyMonths.add(monthKey(day));
+        }
     }
 
     // ---------- 查询 ----------
@@ -149,6 +153,22 @@ public class TokenStatsStore {
                     newName == null || newName.isBlank() ? oldName : newName);
         }
         return players;
+    }
+
+    /**
+     * 某玩家 ID（原始字符串，通常为 UUID；兼容历史坏 ID）是否已有统计行。
+     * 按行键中的原始字符串精确匹配，不解析 UUID。
+     */
+    public boolean containsPlayer(String ownerId) {
+        if (ownerId == null || ownerId.isEmpty()) {
+            return false;
+        }
+        for (RowKey key : rows.keySet()) {
+            if (key.ownerUuid().equals(ownerId)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 数据中最早出现的 epochDay（无数据返回 todayEpochDay） */
@@ -205,71 +225,100 @@ public class TokenStatsStore {
 
     /** 从目录加载全部月度文件 */
     public void load(Path dir) {
-        rows.clear();
-        dirtyMonths.clear();
-        if (!Files.isDirectory(dir)) {
-            return;
-        }
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, "stats-*.json")) {
-            for (Path file : stream) {
-                Matcher matcher = FILE_PATTERN.matcher(file.getFileName().toString());
-                if (!matcher.matches()) {
-                    continue;
-                }
-                try {
-                    List<TokenUsageRecord> loaded = GSON.fromJson(Files.readString(file, StandardCharsets.UTF_8), ROW_LIST_TYPE);
-                    if (loaded == null) {
+        // 磁盘读取不放入状态锁，仅在回写内存状态时短暂持锁
+        List<TokenUsageRecord> loadedRows = new ArrayList<>();
+        if (Files.isDirectory(dir)) {
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, "stats-*.json")) {
+                for (Path file : stream) {
+                    Matcher matcher = FILE_PATTERN.matcher(file.getFileName().toString());
+                    if (!matcher.matches()) {
                         continue;
                     }
-                    for (TokenUsageRecord row : loaded) {
-                        if (row.ownerUuid == null || row.siteId == null || row.model == null) {
+                    try {
+                        List<TokenUsageRecord> loaded = GSON.fromJson(Files.readString(file, StandardCharsets.UTF_8), ROW_LIST_TYPE);
+                        if (loaded == null) {
                             continue;
                         }
-                        rows.put(new RowKey(row.day, row.ownerUuid, row.siteId, row.model), row);
+                        for (TokenUsageRecord row : loaded) {
+                            // 数组中的 null 元素不阻断后续有效行
+                            if (row == null || row.ownerUuid == null || row.siteId == null || row.model == null) {
+                                continue;
+                            }
+                            // ownerUuid 是不透明字符串：历史坏 UUID 原样保留，不解析、不修复、不因格式跳过
+                            loadedRows.add(row);
+                        }
+                    } catch (JsonSyntaxException e) {
+                        // 单个文件损坏只跳过该月，不影响其余数据
+                        LOGGER.warn("统计文件 {} 损坏，已跳过该月数据", file.getFileName(), e);
                     }
-                } catch (JsonSyntaxException e) {
-                    // 单个文件损坏只跳过该月，不影响其余数据
-                    LOGGER.warn("统计文件 {} 损坏，已跳过该月数据", file.getFileName(), e);
                 }
+            } catch (IOException e) {
+                throw new IllegalStateException("统计目录不可读: " + dir, e);
             }
-        } catch (IOException e) {
-            throw new IllegalStateException("统计目录不可读: " + dir, e);
+        }
+        synchronized (stateLock) {
+            rows.clear();
+            dirtyMonths.clear();
+            for (TokenUsageRecord row : loadedRows) {
+                rows.put(new RowKey(row.day, row.ownerUuid, row.siteId, row.model), row);
+            }
         }
     }
 
-    /** 落盘所有脏月份（无脏数据时为空操作） */
+    /**
+     * 落盘所有脏月份（无脏数据时为空操作）。
+     * <p>
+     * 每个月份独立处理：在状态锁内复制该月全部行快照并移交脏标记，释放锁后再序列化、
+     * 写 .tmp、替换正式文件；写盘期间 {@link #record} 重新添加的脏标记保留到下次落盘补写。
+     * 快照移交后写盘失败会在锁内重新标脏并传播原异常；尚未移交快照的失败（如建目录）
+     * 不影响原脏标记。
+     */
     public void flush(Path dir) throws IOException {
-        if (dirtyMonths.isEmpty()) {
-            return;
+        List<Integer> months;
+        synchronized (stateLock) {
+            if (dirtyMonths.isEmpty()) {
+                return;
+            }
+            months = List.copyOf(dirtyMonths);
         }
         Files.createDirectories(dir);
-        for (Integer monthKey : List.copyOf(dirtyMonths)) {
+        for (Integer monthKey : months) {
             LocalDate monthStart = LocalDate.of(monthKey / 12, monthKey % 12 + 1, 1);
             int firstDay = (int) monthStart.toEpochDay();
             int lastDay = (int) monthStart.plusDays(monthStart.lengthOfMonth() - 1).toEpochDay();
 
-            List<TokenUsageRecord> monthRows = new ArrayList<>();
-            for (TokenUsageRecord row : rows.values()) {
-                if (row.day >= firstDay && row.day <= lastDay) {
-                    monthRows.add(row);
+            List<TokenUsageRecord> snapshot;
+            synchronized (stateLock) {
+                snapshot = new ArrayList<>();
+                for (TokenUsageRecord row : rows.values()) {
+                    if (row.day >= firstDay && row.day <= lastDay) {
+                        snapshot.add(row.copy());
+                    }
                 }
+                // 快照完成后移交该月的旧脏标记；此后该月的增量累加会重新标脏
+                dirtyMonths.remove(monthKey);
             }
             Path file = dir.resolve("stats-%04d-%02d.json".formatted(monthStart.getYear(), monthStart.getMonthValue()));
             Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
-            Files.writeString(tmp, GSON.toJson(monthRows, ROW_LIST_TYPE), StandardCharsets.UTF_8);
             try {
-                Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException e) {
-                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
-            }
-            dirtyMonths.remove(monthKey);
-            // 写盘期间回调线程可能新增该月数据（弱一致迭代未覆盖）：有遗漏则保留脏标记，下次落盘补写
-            for (TokenUsageRecord row : rows.values()) {
-                if (row.day >= firstDay && row.day <= lastDay && !monthRows.contains(row)) {
-                    dirtyMonths.add(monthKey);
-                    break;
+                Files.writeString(tmp, GSON.toJson(snapshot, ROW_LIST_TYPE), StandardCharsets.UTF_8);
+                try {
+                    Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                } catch (AtomicMoveNotSupportedException e) {
+                    Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
                 }
+            } catch (IOException e) {
+                synchronized (stateLock) {
+                    dirtyMonths.add(monthKey);
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                synchronized (stateLock) {
+                    dirtyMonths.add(monthKey);
+                }
+                throw e;
             }
+            // 写盘成功后不再移除标记：写盘期间重新添加的脏标记必须保留
         }
     }
 
