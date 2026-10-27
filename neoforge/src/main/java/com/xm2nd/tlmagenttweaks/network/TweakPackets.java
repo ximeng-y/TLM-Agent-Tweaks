@@ -188,7 +188,7 @@ public final class TweakPackets {
                 return;
             }
             if (!TokenStatsService.isAdmin(serverPlayer)) {
-                serverPlayer.sendSystemMessage(Component.translatable("message.tlm_agent_tweaks.stats.denied")
+                serverPlayer.sendSystemMessage(Component.translatable("gui.tlm_agent_tweaks.price.denied")
                         .withStyle(net.minecraft.ChatFormatting.RED));
                 context.reply(new PriceDeniedPayload());
                 return;
@@ -211,7 +211,7 @@ public final class TweakPackets {
                 return;
             }
             if (!TokenStatsService.isAdmin(serverPlayer)) {
-                serverPlayer.sendSystemMessage(Component.translatable("message.tlm_agent_tweaks.stats.denied")
+                serverPlayer.sendSystemMessage(Component.translatable("gui.tlm_agent_tweaks.price.denied")
                         .withStyle(net.minecraft.ChatFormatting.RED));
                 return;
             }
