@@ -22,11 +22,12 @@ public record ModelThinkingConfig(boolean toggleAllowed, Set<ThinkingLevel> leve
     }
 
     /**
-     * 是否存在可供玩家选择的面：允许开关，或允许的强度不止 default。
+     * 是否存在可供玩家选择的面：允许开关，或允许的强度集合不是单独的 default
+     * （仅一个非 default 强度如 {@code {HIGH}} 也构成选择入口）。
      * 两者皆无时点击模型名应直接完成选择，不弹思考菜单。
      */
     public boolean configured() {
-        return toggleAllowed || levels.size() > 1;
+        return toggleAllowed || !levels.equals(Set.of(ThinkingLevel.DEFAULT));
     }
 
     public boolean allows(ThinkingLevel level) {

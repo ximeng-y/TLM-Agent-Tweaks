@@ -17,6 +17,7 @@ import com.xm2nd.tlmagenttweaks.network.TweakPackets;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 玩家侧思考选择屏：点击可配置的模型名后展开的「思考开关 → 思考强度」两级选择。
@@ -61,16 +62,38 @@ public class ThinkingPlayerScreen extends Screen {
         this.config = config == null ? ModelThinkingConfig.unconfigured() : config;
         // 默认开（issue #3）；管理员不允许开关思考时本就不显示开关区，思考隐含开启
         this.thinkingEnabled = true;
-        // 回显女仆已存的思考选择（随配置快照同步）：站点/模型与当前不一致时不回显，
-        // 已存强度不在配置范围内时回落 default，「关闭」也只在开关可用时回显
+        // 初始强度：允许 default 时取 default，否则按枚举顺序取第一个被允许的档位，
+        // 不依赖 Set.copyOf 的迭代顺序
+        this.selectedLevel = initialLevel(this.config);
+        // 回显女仆已存的思考选择（随配置快照同步）：站点/模型与当前不一致时不回显；
+        // 不允许开关时始终保持隐含开启，旧的「关闭」记录不得把页面显示为关闭；
+        // 已存强度仍被允许时保留，未知或已被移除时保持上面选出的合法初始值
         ThinkingConfigPayload.CurrentChoice stored = ClientThinkingConfigCache.current(this.maid.getId());
         if (stored != null && stored.siteId().equals(this.siteId) && stored.modelId().equals(this.modelId)) {
-            this.thinkingEnabled = stored.enabled() && this.config.toggleAllowed();
+            this.thinkingEnabled = !this.config.toggleAllowed() || stored.enabled();
             ThinkingLevel storedLevel = ThinkingLevel.fromId(stored.levelId());
             if (this.thinkingEnabled && this.config.allows(storedLevel)) {
                 this.selectedLevel = storedLevel;
             }
         }
+    }
+
+    /** 初始强度：允许 default 时取 default，否则按 ThinkingLevel 枚举顺序取第一个被允许的档位。 */
+    private static ThinkingLevel initialLevel(ModelThinkingConfig config) {
+        if (config.allows(ThinkingLevel.DEFAULT)) {
+            return ThinkingLevel.DEFAULT;
+        }
+        for (ThinkingLevel level : ThinkingLevel.values()) {
+            if (config.allows(level)) {
+                return level;
+            }
+        }
+        return ThinkingLevel.DEFAULT;
+    }
+
+    /** 强度区是否有实际选择意义：思考开启且允许集合不是单独的 {default}。 */
+    private boolean showLevelSection() {
+        return this.thinkingEnabled && !this.config.levels().equals(Set.of(ThinkingLevel.DEFAULT));
     }
 
     @Override
@@ -103,7 +126,7 @@ public class ThinkingPlayerScreen extends Screen {
             y += ROW_HEIGHT + 12;
         }
 
-        if (this.thinkingEnabled && this.config.levels().size() > 1) {
+        if (showLevelSection()) {
             for (ThinkingLevel level : this.config.levels()) {
                 FlatColorButton button = this.addRenderableWidget(new FlatColorButton(
                         contentLeft, y, contentWidth, ROW_HEIGHT,
@@ -182,7 +205,7 @@ public class ThinkingPlayerScreen extends Screen {
                     contentLeft, y - 9, 0xFF777777);
             y += ROW_HEIGHT + 12;
         }
-        if (this.thinkingEnabled && this.config.levels().size() > 1) {
+        if (showLevelSection()) {
             graphics.drawString(this.font,
                     Component.translatable("gui.tlm_agent_tweaks.player_thinking.level_label"),
                     contentLeft, y - 9, 0xFF777777);
