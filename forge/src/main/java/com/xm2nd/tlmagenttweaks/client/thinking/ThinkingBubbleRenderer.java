@@ -10,6 +10,9 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.packs.resources.ResourceManager;
+import net.minecraft.server.packs.resources.ResourceManagerReloadListener;
+import net.minecraftforge.client.event.RegisterClientReloadListenersEvent;
 
 import javax.annotation.Nullable;
 
@@ -43,7 +46,7 @@ public class ThinkingBubbleRenderer implements IChatBubbleRenderer {
     /** 测宽缓存条目上限：多个女仆同时思考时互不冲刷。 */
     private static final int MEASURE_CACHE_SIZE = 8;
 
-    /** 缓存键：行内容 + 字体实例。字体实例随资源重载更换，天然构成失效条件。 */
+    /** 缓存键：行内容 + 字体实例。字体实例不随字体资源重载更换，字宽变化由重载回调显式清空缓存来失效。 */
     private record MeasureKey(String line, Font font) {
     }
 
@@ -141,6 +144,21 @@ public class ThinkingBubbleRenderer implements IChatBubbleRenderer {
         MeasureResult result = measure(this.line, this.font);
         MEASURE_CACHE.put(key, result);
         return result;
+    }
+
+    /** 字体等资源重载后显式清空测宽缓存，下一次绘制按新字形重新测量与裁剪。 */
+    public static void clearMeasureCache() {
+        MEASURE_CACHE.clear();
+    }
+
+    /** 在客户端资源重载监听注册事件里挂入清空回调：清空发生在重载 apply 阶段，位于字体应用之后。 */
+    public static void registerReloadListener(RegisterClientReloadListenersEvent event) {
+        event.registerReloadListener(new ResourceManagerReloadListener() {
+            @Override
+            public void onResourceManagerReload(ResourceManager resourceManager) {
+                clearMeasureCache();
+            }
+        });
     }
 
     /** 测量整行宽度并裁出可见后缀；未溢出时可见后缀即整行。 */

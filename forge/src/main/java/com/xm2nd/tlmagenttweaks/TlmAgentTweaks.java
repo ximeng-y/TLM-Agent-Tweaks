@@ -47,6 +47,9 @@ public class TlmAgentTweaks {
             // Self-Talk 设置导航桥：FMLClientSetupEvent 属 mod 事件总线，不是 MinecraftForge.EVENT_BUS
             context.getModEventBus().addListener(
                     com.xm2nd.tlmagenttweaks.client.gui.SelfTalkNavigationBridge::onClientSetup);
+            // 字体等资源重载后清空思考气泡的测宽缓存（重载 apply 阶段回调，同属 mod 事件总线）
+            context.getModEventBus().addListener(
+                    com.xm2nd.tlmagenttweaks.client.thinking.ThinkingBubbleRenderer::registerReloadListener);
         }
 
         // 客户端 Cloth Config 配置界面：反射注册（未装 cloth-config 时自动跳过）
