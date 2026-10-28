@@ -27,8 +27,7 @@ public class StatsEntryScreen extends Screen {
 
     private final Screen parent;
 
-    /** 页面生命周期内只发一次状态请求：resize 触发的 init 重跑不重复发。 */
-    private boolean snapshotRequested;
+    /** 服务端权威快照：为 null 表示尚未收到（含回包丢失）。 */
     private ChatVisibilityPayload snapshot;
     private boolean privateWaiting;
     private boolean globalWaiting;
@@ -45,8 +44,9 @@ public class StatsEntryScreen extends Screen {
         // 与新版 Self-Talk 合装时，统一页签由本页自行注册
         SettingsNavigationController.addTweaksPageTabs(this::addRenderableWidget);
 
-        if (!this.snapshotRequested) {
-            this.snapshotRequested = true;
+        // 快照未到达或仍有保存待确认时重新请求：回包可能在子页打开期间丢失，
+        // 从 Token 统计页返回后靠此恢复；收到快照且无等待保存时不再重发
+        if (this.snapshot == null || this.privateWaiting || this.globalWaiting) {
             TweakPackets.sendToServer(new RequestChatVisibilityPayload());
         }
 
