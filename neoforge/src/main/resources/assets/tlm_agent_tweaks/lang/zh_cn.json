@@ -27,6 +27,12 @@
   "gui.tlm_agent_tweaks.button.thinking_off": "显示思考链：关闭",
   "gui.tlm_agent_tweaks.button.thinking.tooltip": "仅控制本机玩家是否在等待气泡中滚动显示模型思考链，不影响工具提示与请求本身",
 
+  "gui.tlm_agent_tweaks.chat_privacy.checkbox": "我的对话设为私密",
+  "gui.tlm_agent_tweaks.chat_privacy.checkbox.tooltip": "作用于你自己与所有女仆的普通对话：勾选后，不再把你的原文和女仆的最终回复以聊天栏消息广播给其他玩家；不影响女仆气泡、语音与原有可见范围",
+  "gui.tlm_agent_tweaks.chat_privacy.global_on": "服务器普通对话全局可见：开启",
+  "gui.tlm_agent_tweaks.chat_privacy.global_off": "服务器普通对话全局可见：关闭",
+  "gui.tlm_agent_tweaks.chat_privacy.loading": "加载中…",
+
   "gui.tlm_agent_tweaks.stats.title": "Token 消耗详情",
   "gui.tlm_agent_tweaks.stats.tab.ranking": "玩家排行",
   "gui.tlm_agent_tweaks.stats.tab.player": "玩家明细",

@@ -27,6 +27,8 @@ public class TlmAgentTweaks {
     public TlmAgentTweaks(FMLJavaModLoadingContext context) {
         // COMMON 配置（服务端权威）
         context.registerConfig(ModConfig.Type.COMMON, Config.SPEC);
+        // 配置重载监听：收口聊天全局可见开关的状态应用与黄字通知（mod 事件总线，非游戏总线）
+        context.getModEventBus().addListener(com.xm2nd.tlmagenttweaks.chat.ChatVisibilityService::onModConfigReloading);
         // 网络包（Forge 1.20.1 走 SimpleChannel，由本类初始化时一次性建通道）
         TweakPackets.register();
         // 服务端生命周期（统计引擎加载/落盘）

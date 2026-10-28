@@ -5,17 +5,21 @@ import com.github.tartaricacid.touhoulittlemaid.ai.manager.response.ResponseChat
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.LLMClient;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.response.ToolCall;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
+import com.xm2nd.tlmagenttweaks.chat.ChatVisibilityService;
+import com.xm2nd.tlmagenttweaks.chat.NormalChatOriginAccess;
 import com.xm2nd.tlmagenttweaks.protocol.stream.ProtocolHttpBridge;
 import com.xm2nd.tlmagenttweaks.protocol.stream.ThinkingFailureNotice;
 import com.xm2nd.tlmagenttweaks.thinking.ThinkingDisplayService;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.net.http.HttpRequest;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -39,13 +43,29 @@ import java.util.concurrent.CompletableFuture;
  * </ul>
  */
 @Mixin(value = LLMCallback.class, remap = false)
-public abstract class LLMCallbackMixin {
+public abstract class LLMCallbackMixin implements NormalChatOriginAccess {
 
     @Shadow
     protected EntityMaid maid;
 
     @Shadow
     protected long waitingChatBubbleId;
+
+    /** 正式普通对话来源：仅由 normalChat 的真实派发点写入，默认无来源。 */
+    @Unique
+    private UUID tlmAgentTweaks$normalChatOrigin;
+
+    @Override
+    public void tlmAgentTweaks$setNormalChatOrigin(UUID playerId) {
+        this.tlmAgentTweaks$normalChatOrigin = playerId;
+    }
+
+    @Override
+    public UUID tlmAgentTweaks$takeNormalChatOrigin() {
+        UUID origin = this.tlmAgentTweaks$normalChatOrigin;
+        this.tlmAgentTweaks$normalChatOrigin = null;
+        return origin;
+    }
 
     /** 对话正常结束（写历史、给气泡、播报均在其后由 TLM 完成）。 */
     @Inject(method = "onSuccess", at = @At("HEAD"), cancellable = true)
@@ -61,6 +81,23 @@ public abstract class LLMCallbackMixin {
         }
         // 直接调用父类成功：兜底收尾。重复进入无副作用。
         ProtocolHttpBridge.tryFinish((LLMCallback) (Object) this);
+    }
+
+    /**
+     * 普通对话最终成功的公开回复钩子。
+     * <p>
+     * 挂在最后正常返回点：空白回复早退走 onFailure、超时/取消的迟到成功在 HEAD 被取消，
+     * 两者都不会到达此处，自然不进入公开广播。仅携带正式普通来源标记的回调才处理，
+     * 工具子请求、摘要、人设生成与 Self-Talk 回调没有该标记，不会被公开。
+     */
+    @Inject(method = "onSuccess(Lcom/github/tartaricacid/touhoulittlemaid/ai/manager/response/ResponseChat;)V",
+            at = @At("TAIL"))
+    private void tlmAgentTweaks$broadcastNormalReply(ResponseChat responseChat, CallbackInfo ci) {
+        UUID origin = this.tlmAgentTweaks$takeNormalChatOrigin();
+        if (origin == null) {
+            return;
+        }
+        ChatVisibilityService.onNormalReplySuccess(this.maid, origin, responseChat.getChatText());
     }
 
     /**

@@ -2,6 +2,8 @@ package com.xm2nd.tlmagenttweaks.client;
 
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.xm2nd.tlmagenttweaks.client.thinking.ThinkingDisplayCache;
+import com.xm2nd.tlmagenttweaks.client.gui.StatsEntryScreen;
+import com.xm2nd.tlmagenttweaks.network.ChatVisibilityPayload;
 import com.xm2nd.tlmagenttweaks.network.CompressHistoryResultPayload;
 import com.xm2nd.tlmagenttweaks.network.CompressHistoryStatePayload;
 import com.xm2nd.tlmagenttweaks.network.PriceDeniedPayload;
@@ -80,5 +82,12 @@ public final class ClientPacketHandlers {
     public static void onThinkingConfig(ThinkingConfigPayload payload) {
         ClientThinkingConfigCache.accept(payload.configs());
         ClientThinkingConfigCache.acceptCurrent(payload.current());
+    }
+
+    public static void onChatVisibility(ChatVisibilityPayload payload) {
+        if (Minecraft.getInstance().screen instanceof StatsEntryScreen screen) {
+            screen.tlmAgentTweaks$onVisibilitySnapshot(payload);
+        }
+        // 页面不存在时无需缓存，下次打开会重新请求
     }
 }

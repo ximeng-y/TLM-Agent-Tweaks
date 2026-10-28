@@ -25,6 +25,12 @@ public final class Config {
             .comment("是否把历史压缩摘要请求也计入 token 统计（这些请求同样消耗 token）")
             .define("stats.recordSummaryCalls", true);
 
+    public static final ForgeConfigSpec.BooleanValue CHAT_GLOBAL_VISIBLE = BUILDER
+            .comment("玩家与女仆普通对话内容全局可见总开关（服务端权威）。开启且玩家未勾选「我的对话设为私密」时，",
+                    "玩家原文与女仆最终文字回复会以灰色系统消息广播给全服其他在线玩家（跨维度，无距离筛选）；",
+                    "关闭或玩家勾选私密时不新增广播，TLM 原有的本人/主人回显与气泡不受影响")
+            .define("chat.globalVisible", true);
+
     public static final ForgeConfigSpec.BooleanValue RETRY_ENABLED = BUILDER
             .comment("请求失败自动重试总开关（服务端权威）。开启后：429 与 500/502/503/504 最多额外重试 2 次，",
                     "每次固定等待 5 秒（忽略 Retry-After，不做指数退避）；站点冷却期间后到的请求会排队延后发送。",

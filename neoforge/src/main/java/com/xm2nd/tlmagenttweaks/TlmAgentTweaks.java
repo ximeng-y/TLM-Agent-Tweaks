@@ -23,6 +23,8 @@ public class TlmAgentTweaks {
     public TlmAgentTweaks(IEventBus modEventBus) {
         // COMMON 配置（服务端权威）
         ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.COMMON, Config.SPEC);
+        // 配置重载监听：收口聊天全局可见开关的状态应用与黄字通知（mod 事件总线，非游戏总线）
+        modEventBus.addListener(com.xm2nd.tlmagenttweaks.chat.ChatVisibilityService::onModConfigReloading);
         // 网络包
         modEventBus.addListener(TweakPackets::register);
         // 服务端生命周期（统计引擎加载/落盘）
