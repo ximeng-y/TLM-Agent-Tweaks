@@ -5,6 +5,7 @@ import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.LLMSite;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.LLMOpenAISite;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
+import com.xm2nd.tlmagenttweaks.chat.ChatVisibilityService;
 import com.xm2nd.tlmagenttweaks.client.ClientPacketHandlers;
 import com.xm2nd.tlmagenttweaks.common.GranularityUtil;
 import com.xm2nd.tlmagenttweaks.common.Price4;
@@ -19,6 +20,7 @@ import com.xm2nd.tlmagenttweaks.stats.TokenStatsService;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.network.NetworkDirection;
 import net.minecraftforge.network.NetworkEvent;
@@ -85,6 +87,12 @@ public final class TweakPackets {
         toServer(created, RequestThinkingConfigPayload.class, 10, TweakPackets::handleThinkingConfigRequest);
         toClient(created, ThinkingConfigPayload.class, 11, TweakPackets::handleThinkingConfig);
         toServer(created, SaveThinkingChoicePayload.class, 12, TweakPackets::handleSaveThinkingChoice);
+
+        // 聊天可见性：请求/保存，与思考配置一样允许缺失，不影响进服
+        toServer(created, RequestChatVisibilityPayload.class, 13, TweakPackets::handleChatVisibilityRequest);
+        toServer(created, SaveChatPrivacyPayload.class, 14, TweakPackets::handleSaveChatPrivacy);
+        toServer(created, SaveGlobalChatVisibilityPayload.class, 15, TweakPackets::handleSaveGlobalChatVisibility);
+        toClient(created, ChatVisibilityPayload.class, 16, TweakPackets::handleChatVisibility);
     }
 
     /** 已建的通道；未完成注册时为 {@code null}。 */
@@ -159,6 +167,14 @@ public final class TweakPackets {
             payload.write(buf);
         } else if (message instanceof SaveThinkingChoicePayload payload) {
             payload.write(buf);
+        } else if (message instanceof RequestChatVisibilityPayload payload) {
+            payload.write(buf);
+        } else if (message instanceof SaveChatPrivacyPayload payload) {
+            payload.write(buf);
+        } else if (message instanceof SaveGlobalChatVisibilityPayload payload) {
+            payload.write(buf);
+        } else if (message instanceof ChatVisibilityPayload payload) {
+            payload.write(buf);
         } else {
             throw new IllegalArgumentException("未注册的网络包类型: " + message.getClass().getName());
         }
@@ -194,6 +210,14 @@ public final class TweakPackets {
             payload = ThinkingConfigPayload.read(buf);
         } else if (type == SaveThinkingChoicePayload.class) {
             payload = SaveThinkingChoicePayload.read(buf);
+        } else if (type == RequestChatVisibilityPayload.class) {
+            payload = RequestChatVisibilityPayload.read(buf);
+        } else if (type == SaveChatPrivacyPayload.class) {
+            payload = SaveChatPrivacyPayload.read(buf);
+        } else if (type == SaveGlobalChatVisibilityPayload.class) {
+            payload = SaveGlobalChatVisibilityPayload.read(buf);
+        } else if (type == ChatVisibilityPayload.class) {
+            payload = ChatVisibilityPayload.read(buf);
         } else {
             throw new IllegalArgumentException("未注册的网络包类型: " + type.getName());
         }
@@ -468,5 +492,51 @@ public final class TweakPackets {
             return;
         }
         MaidThinkingChoiceStore.write(maid, payload.siteId(), payload.modelId(), true, level);
+    }
+
+    // ---------- 聊天可见性 ----------
+
+    private static void handleChatVisibilityRequest(RequestChatVisibilityPayload payload,
+                                                    Supplier<NetworkEvent.Context> ctx) {
+        NetworkEvent.Context context = ctx.get();
+        ServerPlayer player = context.getSender();
+        if (player != null) {
+            reply(chatVisibilitySnapshot(player), context);
+        }
+    }
+
+    private static void handleSaveChatPrivacy(SaveChatPrivacyPayload payload,
+                                              Supplier<NetworkEvent.Context> ctx) {
+        NetworkEvent.Context context = ctx.get();
+        ServerPlayer player = context.getSender();
+        if (player != null) {
+            ChatVisibilityService.savePrivate(player, payload.privateChat());
+            // 回带权威状态快照，不把本地乐观值当作已保存结果
+            reply(chatVisibilitySnapshot(player), context);
+        }
+    }
+
+    private static void handleSaveGlobalChatVisibility(SaveGlobalChatVisibilityPayload payload,
+                                                       Supplier<NetworkEvent.Context> ctx) {
+        NetworkEvent.Context context = ctx.get();
+        ServerPlayer player = context.getSender();
+        if (player != null) {
+            // 无权限时不修改配置；仍然回带真实状态供界面恢复
+            ChatVisibilityService.saveGlobalFromAdmin(player, payload.globalVisible());
+            reply(chatVisibilitySnapshot(player), context);
+        }
+    }
+
+    private static void handleChatVisibility(ChatVisibilityPayload payload, Supplier<NetworkEvent.Context> ctx) {
+        ClientPacketHandlers.onChatVisibility(payload);
+    }
+
+    private static ChatVisibilityPayload chatVisibilitySnapshot(ServerPlayer player) {
+        MinecraftServer server = player.getServer();
+        boolean global = ChatVisibilityService.isGlobalVisible();
+        boolean privateChat = server != null
+                && ChatVisibilityService.isPrivate(server, player.getUUID());
+        boolean canManage = ChatVisibilityService.canManageGlobal(player);
+        return new ChatVisibilityPayload(global, privateChat, canManage);
     }
 }

@@ -27,6 +27,12 @@
   "gui.tlm_agent_tweaks.button.thinking_off": "Show Thinking: Off",
   "gui.tlm_agent_tweaks.button.thinking.tooltip": "Only controls whether this client scrolls the model thinking in the waiting bubble; tool tips and the request itself are unaffected",
 
+  "gui.tlm_agent_tweaks.chat_privacy.checkbox": "Keep my chats private",
+  "gui.tlm_agent_tweaks.chat_privacy.checkbox.tooltip": "Applies to your normal chats with all of your maids: when checked, your raw messages and the maids' final replies are no longer broadcast to other players in chat; bubbles, voice and existing visibility are unaffected",
+  "gui.tlm_agent_tweaks.chat_privacy.global_on": "Server maid chats visible to everyone: On",
+  "gui.tlm_agent_tweaks.chat_privacy.global_off": "Server maid chats visible to everyone: Off",
+  "gui.tlm_agent_tweaks.chat_privacy.loading": "Loading…",
+
   "gui.tlm_agent_tweaks.stats.title": "Token Usage Details",
   "gui.tlm_agent_tweaks.stats.tab.ranking": "Ranking",
   "gui.tlm_agent_tweaks.stats.tab.player": "Player",

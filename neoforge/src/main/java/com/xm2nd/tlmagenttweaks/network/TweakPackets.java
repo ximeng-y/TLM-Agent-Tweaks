@@ -5,6 +5,7 @@ import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.LLMSite;
 import com.github.tartaricacid.touhoulittlemaid.ai.service.llm.openai.LLMOpenAISite;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.xm2nd.tlmagenttweaks.TlmAgentTweaks;
+import com.xm2nd.tlmagenttweaks.chat.ChatVisibilityService;
 import com.xm2nd.tlmagenttweaks.client.ClientPacketHandlers;
 import com.xm2nd.tlmagenttweaks.common.GranularityUtil;
 import com.xm2nd.tlmagenttweaks.common.Price4;
@@ -17,6 +18,7 @@ import com.xm2nd.tlmagenttweaks.protocol.MaidThinkingChoiceStore;
 import com.xm2nd.tlmagenttweaks.protocol.ProtocolLLMSite;
 import com.xm2nd.tlmagenttweaks.stats.TokenStatsService;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Player;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -81,6 +83,15 @@ public final class TweakPackets {
                 TweakPackets::handleThinkingConfig);
         registrar.playToServer(SaveThinkingChoicePayload.TYPE, SaveThinkingChoicePayload.STREAM_CODEC,
                 TweakPackets::handleSaveThinkingChoice);
+        // 聊天可见性：请求/保存均为 optional，不支持它的客户端照常进服
+        registrar.playToServer(RequestChatVisibilityPayload.TYPE, RequestChatVisibilityPayload.STREAM_CODEC,
+                TweakPackets::handleChatVisibilityRequest);
+        registrar.playToServer(SaveChatPrivacyPayload.TYPE, SaveChatPrivacyPayload.STREAM_CODEC,
+                TweakPackets::handleSaveChatPrivacy);
+        registrar.playToServer(SaveGlobalChatVisibilityPayload.TYPE, SaveGlobalChatVisibilityPayload.STREAM_CODEC,
+                TweakPackets::handleSaveGlobalChatVisibility);
+        registrar.playToClient(ChatVisibilityPayload.TYPE, ChatVisibilityPayload.STREAM_CODEC,
+                TweakPackets::handleChatVisibility);
     }
 
     // ---------- 压缩 ----------
@@ -331,5 +342,49 @@ public final class TweakPackets {
             }
             MaidThinkingChoiceStore.write(maid, payload.siteId(), payload.modelId(), true, level);
         });
+    }
+
+    // ---------- 聊天可见性 ----------
+
+    private static void handleChatVisibilityRequest(RequestChatVisibilityPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (context.player() instanceof ServerPlayer player) {
+                context.reply(chatVisibilitySnapshot(player));
+            }
+        });
+    }
+
+    private static void handleSaveChatPrivacy(SaveChatPrivacyPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (context.player() instanceof ServerPlayer player) {
+                ChatVisibilityService.savePrivate(player, payload.privateChat());
+                // 回带权威状态快照，不把本地乐观值当作已保存结果
+                context.reply(chatVisibilitySnapshot(player));
+            }
+        });
+    }
+
+    private static void handleSaveGlobalChatVisibility(SaveGlobalChatVisibilityPayload payload,
+                                                       IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (context.player() instanceof ServerPlayer player) {
+                // 无权限时不修改配置；仍然回带真实状态供界面恢复
+                ChatVisibilityService.saveGlobalFromAdmin(player, payload.globalVisible());
+                context.reply(chatVisibilitySnapshot(player));
+            }
+        });
+    }
+
+    private static void handleChatVisibility(ChatVisibilityPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> ClientPacketHandlers.onChatVisibility(payload));
+    }
+
+    private static ChatVisibilityPayload chatVisibilitySnapshot(ServerPlayer player) {
+        MinecraftServer server = player.getServer();
+        boolean global = ChatVisibilityService.isGlobalVisible();
+        boolean privateChat = server != null
+                && ChatVisibilityService.isPrivate(server, player.getUUID());
+        boolean canManage = ChatVisibilityService.canManageGlobal(player);
+        return new ChatVisibilityPayload(global, privateChat, canManage);
     }
 }
